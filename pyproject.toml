@@ -5,6 +5,7 @@ description = "Multi Agent Customer Support"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "langchain-core>=1.5.1",
     "python-dotenv>=1.2.2",
     "requests>=2.32",
     "sqlalchemy>=2.0",
