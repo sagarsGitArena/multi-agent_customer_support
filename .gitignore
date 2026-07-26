@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Env
+.env
+.venv/
+
+# Cache / downloaded data
+cache/
+src/cache/
+
+# Logs / scratch
+*.log
+tmp
+
+# LibreOffice/OpenOffice lock files
+.~lock.*
