@@ -24,3 +24,7 @@ package = true
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"

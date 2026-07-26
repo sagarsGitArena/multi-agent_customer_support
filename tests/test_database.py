@@ -3,7 +3,9 @@ import json
 import pytest
 
 from customer_support.db import execute_query, run_query_safe, verify_database
+import logging
 
+logger = logging.getLogger(__name__)
 
 class TestExecuteQuery:
 
@@ -73,3 +75,8 @@ class TestVerifyDatabase:
         health = verify_database()
 
         assert health["customer_count"] == 59
+
+class TestHelloworldPyTest:
+    def test_print_helloworld(self):
+        print('HelloWorld PyTest')
+        logger.info("HelloWorld PyTest")

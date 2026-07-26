@@ -60,6 +60,8 @@ uv add python-dotenv
 uv add --dev pytest
 
 
+
+
 cat > /tmp/test_query.py << 'EOF'
 from customer_support.db.database import load_database, execute_query
 
@@ -68,3 +70,13 @@ print(execute_query("SELECT name FROM sqlite_master WHERE type = 'table'"))
 EOF
 
 uv run python /tmp/test_query.py
+
+to print the stdouts
+    uv run pytest -s
+    or
+    to print the stdouts
+    uv run pytest --capture=no
+
+#to print info level logs (log.info)
+    uv run pytest -v -o log_cli=true --log-cli-level=INFO
+    instead the following to pyproject.toml
