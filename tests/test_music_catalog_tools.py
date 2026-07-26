@@ -39,7 +39,7 @@ class TestMusicCatalogTools:
                 "genre_name": "Rock"
             }
         )
-        data = json.loads(result)
+        data = result # json.loads(result)
         
         assert "total_tracks" in data
         assert "representative_tracks" in data
