@@ -2,6 +2,8 @@ import json
 from langchain_core.tools import tool
 
 from customer_support.db.database import execute_query
+from customer_support.tools.validation import parse_id
+from customer_support.tools.responses import not_found
 
 
 @tool
@@ -18,9 +20,10 @@ def search_albums_by_artist(artist_name: str) -> str:
         artist_name (str): Name of the artist
 
     Returns:
-        str: JSON string containing matching albums.
+        str: JSON string containing matching albums, or a
+        human-readable message if none are found.
     """
-    
+
     query = """
         SELECT
             Artist.Name AS artist_name,
@@ -34,9 +37,10 @@ def search_albums_by_artist(artist_name: str) -> str:
     params = {
         "artist_name": f"%{artist_name}%"
     }
-    
+
     result = execute_query(query, params)
-    print(result)
+    if not json.loads(result):
+        return not_found(f"No albums found for artist: {artist_name}")
     return result
 
 
@@ -54,8 +58,9 @@ def search_tracks_by_artist(artist_name: str) -> str:
         artist_name (str): Name of the artist
 
     Returns:
-        - total number of tracks by the artist
-        - sample of up to 20 tracks
+        JSON string containing the total number of tracks by the
+        artist and a sample of up to 20 tracks, or a human-readable
+        message if none are found.
     """
     tracks_count_query = """
         SELECT  COUNT(*) AS total_tracks
@@ -85,23 +90,23 @@ def search_tracks_by_artist(artist_name: str) -> str:
     params = {
         "artist_name": f"%{artist_name}%"
     }
-    
-    count_result = execute_query(
-        tracks_sample_query,
-        params
+
+    count_result = json.loads(
+        execute_query(tracks_count_query, params)
+    )
+    total_tracks = count_result[0]["total_tracks"]
+
+    if total_tracks == 0:
+        return not_found(f"No tracks found for artist: {artist_name}")
+
+    sample_result = json.loads(
+        execute_query(tracks_sample_query, params)
     )
 
-    sample_result = execute_query(
-        tracks_sample_query,
-        params
-    )
-    
-    
-    
     return json.dumps(
         {
-            "total_tracks": json.loads(count_result),
-            "sample_tracks": json.loads(sample_result)
+            "total_tracks": total_tracks,
+            "sample_tracks": sample_result
         },
         indent=2
     )
@@ -116,9 +121,9 @@ def browse_songs_by_genre(genre_name: str) -> str:
         genre_name (str): Genre name such as Rock, Jazz, Metal, etc.
 
     Returns:
-        - total number of songs in the genre
-        - up to 10 representative tracks
-        - one track per artist to ensure diversity
+        JSON string containing the total number of songs in the
+        genre and up to 10 representative tracks (one per artist),
+        or a human-readable message if none are found.
     """
     
     params = {
@@ -184,60 +189,15 @@ def browse_songs_by_genre(genre_name: str) -> str:
         WHERE rn = 1
         LIMIT 10
     """
-# But there is a subtle SQL issue
-# The query:
-# GROUP BY Artist.ArtistId
-# works in SQLite, but SQLite chooses an arbitrary track from that artist.
-# For a demo project this is acceptable.
-# However, for production-quality SQL, I would explicitly choose the first track.
-# A better SQLite approach:
-# SELECT
-#     artist_name,
-#     track_name,
-#     album_title,
-#     genre_name
-# FROM
-# (
-#     SELECT
-#         Artist.Name AS artist_name,
-#         Track.Name AS track_name,
-#         Album.Title AS album_title,
-#         Genre.Name AS genre_name,
-#         ROW_NUMBER() OVER (
-#             PARTITION BY Artist.ArtistId
-#             ORDER BY Track.Name
-#         ) AS rn
-#     FROM Track
-#     JOIN Genre
-#         ON Track.GenreId = Genre.GenreId
-#     JOIN Album
-#         ON Track.AlbumId = Album.AlbumId
-#     JOIN Artist
-#         ON Album.ArtistId = Artist.ArtistId
-#     WHERE Genre.Name LIKE :genre_name
-# )
-
-# WHERE rn = 1
-
-# LIMIT 10
-
-# This says:
-
-# For each artist:
-#      rank their tracks
-
-# Pick:
-#      track number 1
-
-# Then:
-#      return max 10 artists
-
-# This is the better implementation.    
     
     
     count_result = json.loads(
         execute_query(genre_count_query, params)
     )
+    total_tracks = count_result[0]["total_tracks"]
+
+    if total_tracks == 0:
+        return not_found(f"No songs found for genre: {genre_name}")
 
     sample_result = json.loads(
         execute_query(genre_sample_query, params)
@@ -246,9 +206,114 @@ def browse_songs_by_genre(genre_name: str) -> str:
     return json.dumps(
         {
             "genre": genre_name,
-            "total_tracks": count_result[0]["total_tracks"],
+            "total_tracks": total_tracks,
             "representative_tracks": sample_result
         },
         indent=2
     )
-    
+
+
+@tool
+def search_songs_by_title(song_title: str) -> str:
+    """
+    Search songs by title using a fuzzy match.
+
+    Use this tool when a user asks for:
+    - a song
+    - a track
+    - songs with a particular title
+    - tracks matching part of a title
+
+    Args:
+        song_title:
+            Full or partial song title.
+
+    Returns:
+        JSON string containing up to 10 matching tracks, or a
+        human-readable message if none are found.
+    """
+
+    query = """
+        SELECT
+            Track.Name AS track_title,
+            Artist.Name AS artist_name,
+            Album.Title AS album_title,
+            Genre.Name AS genre_name,
+            Track.Composer AS composer,
+            ROUND(Track.Milliseconds / 1000.0, 1) AS duration_seconds
+        FROM Track
+        JOIN Album
+            ON Track.AlbumId = Album.AlbumId
+        JOIN Artist
+            ON Album.ArtistId = Artist.ArtistId
+        JOIN Genre
+            ON Track.GenreId = Genre.GenreId
+        WHERE Track.Name LIKE :song_title
+        ORDER BY Track.Name
+        LIMIT 10
+    """
+
+    params = {
+        "song_title": f"%{song_title}%"
+    }
+
+    result = execute_query(query, params)
+    if not json.loads(result):
+        return not_found(f"No songs found matching title: {song_title}")
+    return result
+
+
+@tool
+def get_track_details(track_id: str) -> str:
+    """
+    Get full details for a specific track by its ID.
+
+    Use this tool when a user asks for:
+    - details about a specific track
+    - more information about a song they already found
+    - the price, duration, or media type of a track
+
+    Args:
+        track_id (str): The unique ID of the track. Must be numeric.
+
+    Returns:
+        JSON string containing the track's full details, a
+        human-readable message if no track matches the given ID, or
+        an error message if track_id is not a valid number.
+    """
+
+    parsed_track_id, error = parse_id(track_id, "track_id")
+    if error:
+        return error
+
+    query = """
+        SELECT
+            Track.TrackId AS track_id,
+            Track.Name AS track_title,
+            Artist.Name AS artist_name,
+            Album.Title AS album_title,
+            Genre.Name AS genre_name,
+            MediaType.Name AS media_type,
+            Track.Composer AS composer,
+            ROUND(Track.Milliseconds / 1000.0, 1) AS duration_seconds,
+            Track.UnitPrice AS unit_price
+        FROM Track
+        LEFT JOIN Album
+            ON Track.AlbumId = Album.AlbumId
+        LEFT JOIN Artist
+            ON Album.ArtistId = Artist.ArtistId
+        LEFT JOIN Genre
+            ON Track.GenreId = Genre.GenreId
+        JOIN MediaType
+            ON Track.MediaTypeId = MediaType.MediaTypeId
+        WHERE Track.TrackId = :track_id
+    """
+
+    params = {
+        "track_id": parsed_track_id
+    }
+
+    result = execute_query(query, params)
+    if not json.loads(result):
+        return not_found(f"No track found with ID: {track_id}")
+    return result
