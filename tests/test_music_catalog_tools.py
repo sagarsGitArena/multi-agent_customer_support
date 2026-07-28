@@ -20,7 +20,11 @@ class TestMusicCatalogTools:
                 "artist_name": "AC/DC"
             }
         )
-        assert "Let There Be Rock" in result
+        data = json.loads(result)
+
+        assert any(
+            album["album_title"] == "Let There Be Rock" for album in data
+        )
 
     def test_search_album_by_artist_no_match(self):
         result = search_albums_by_artist.invoke(
@@ -72,6 +76,14 @@ class TestMusicCatalogTools:
         assert "representative_tracks" in data
         tracks = data["representative_tracks"]
         assert len(tracks) <= 10
+
+    def test_browse_genre_is_deterministic(self):
+        results = [
+            browse_songs_by_genre.invoke({"genre_name": "Rock"})
+            for _ in range(5)
+        ]
+
+        assert all(result == results[0] for result in results)
 
     def test_browse_genre_no_match(self):
         result = browse_songs_by_genre.invoke(
@@ -155,10 +167,14 @@ class TestMusicCatalogTools:
 
         assert data == {"message": "No track found with ID: 999999"}
 
-    def test_get_track_details_non_numeric(self):
+    @pytest.mark.parametrize(
+        "invalid_track_id",
+        ["abc", "", "  ", "1.5", "1,2", "NaN", "None", "1e3"],
+    )
+    def test_get_track_details_invalid_input(self, invalid_track_id):
         result = get_track_details.invoke(
             {
-                "track_id": "abc"
+                "track_id": invalid_track_id
             }
         )
         data = json.loads(result)

@@ -137,24 +137,6 @@ def browse_songs_by_genre(genre_name: str) -> str:
             ON Track.GenreId = Genre.GenreId
         WHERE Genre.Name LIKE :genre_name
     """
-    
-    
-    # SELECT
-    #     Artist.Name AS artist_name,
-    #     Track.Name AS track_name,
-    #     Album.Title AS album_title,
-    #     Genre.Name AS genre_name
-    # FROM Track
-    # JOIN Genre
-    #     ON Track.GenreId = Genre.GenreId
-    # JOIN Album
-    #     ON Track.AlbumId = Album.AlbumId
-    # JOIN Artist
-    #     ON Album.ArtistId = Artist.ArtistId
-    # WHERE Genre.Name LIKE :genre_name
-    # GROUP BY Artist.ArtistId
-    # ORDER BY Artist.Name
-    # LIMIT 10
     genre_sample_query = """
         SELECT
             artist_name,
@@ -164,13 +146,14 @@ def browse_songs_by_genre(genre_name: str) -> str:
         FROM
         (
             SELECT
+                Artist.ArtistId AS artist_id,
                 Artist.Name AS artist_name,
                 Track.Name AS track_name,
                 Album.Title AS album_title,
                 Genre.Name AS genre_name,
                 ROW_NUMBER() OVER (
                     PARTITION BY Artist.ArtistId
-                    ORDER BY Track.Name
+                    ORDER BY Track.TrackId
                 ) AS rn
 
             FROM Track
@@ -187,6 +170,7 @@ def browse_songs_by_genre(genre_name: str) -> str:
             WHERE Genre.Name LIKE :genre_name
         )
         WHERE rn = 1
+        ORDER BY artist_id
         LIMIT 10
     """
     
