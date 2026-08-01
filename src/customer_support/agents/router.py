@@ -1,0 +1,88 @@
+"""
+Router node for the catalog / invoice agentic graph.
+
+Location: src/customer_support/agents/router.py
+
+Extracts ALL intents present in the message, not just one — a query
+can ask about catalog and invoice in the same turn. Also flags an
+explicit preference statement, if any (not a genre mention in a
+request — see preference_signal description).
+"""
+
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
+
+from customer_support.config import get_llm
+from customer_support.graph.state import GraphState
+
+
+class IntentClassification(BaseModel):
+    intents: list[Literal["catalog", "invoice"]] = Field(
+        description=(
+            "All intents present in the message, in the order they should "
+            "be handled. Most messages have exactly one. Include both only "
+            "if the customer genuinely asked about two different things, "
+            "e.g. catalog availability AND an order/invoice question."
+        )
+    )
+    preference_signal: Optional[str] = Field(
+        default=None,
+        description=(
+            "ONLY set this if the customer explicitly states a lasting "
+            "preference using language like 'I like', 'I love', 'I prefer', "
+            "'my favorite is', or similar. Do NOT set this just because a "
+            "genre, artist, or product was mentioned in a request — "
+            "'play me some rock' or 'find rock albums' is a one-off request, "
+            "not a preference, and must be left null."
+        ),
+    )
+    reasoning: str = Field(description="One sentence explaining the classification.")
+
+
+ROUTER_SYSTEM_PROMPT = """You are the routing layer for a music store \
+assistant. Read the customer's latest message and identify every intent \
+present in it.
+
+- "catalog": browsing music, artists, albums, tracks, availability, or \
+  asking for recommendations.
+- "invoice": anything about a specific purchase, order, receipt, refund, \
+  or billing history.
+
+A message can contain both — list every intent that applies, in the \
+order the customer raised them.
+
+For preference_signal: only capture it when the customer explicitly \
+states a lasting like/love/preference (e.g. "I love jazz", "I prefer \
+email receipts"). A request that merely mentions a genre or product \
+(e.g. "play me some rock", "do you have any jazz albums") is NOT a \
+preference — leave preference_signal null in that case, even though \
+the intent classification itself is unaffected. Do not answer the \
+customer's question yourself — only classify."""
+
+router_llm = get_llm().with_structured_output(IntentClassification)
+
+
+def router_node(state: GraphState) -> dict:
+    """Classify all intents in the latest customer message and return
+    a partial state update. LangGraph merges this into the full state."""
+
+    last_message = state["messages"][-1]
+    content = getattr(last_message, "content", last_message)
+
+    result: IntentClassification = router_llm.invoke(
+        [
+            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ]
+    )
+
+    # Catalog is never gated, invoice always might be — so catalog goes
+    # first regardless of the order the customer mentioned them in.
+    # This guarantees dispatch_next_intent answers what it can before
+    # ever reaching the identity gate.
+    ordered_intents = sorted(result.intents, key=lambda i: 0 if i == "catalog" else 1)
+
+    return {
+        "intents": ordered_intents,
+        "pending_preference_signal": result.preference_signal,
+    }

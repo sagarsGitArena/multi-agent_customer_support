@@ -147,3 +147,4 @@ def verify_database() -> dict:
 
 # Backwards-compatible alias
 database_health_check = verify_database
+load_database()
