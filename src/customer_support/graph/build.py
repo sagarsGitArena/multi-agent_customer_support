@@ -16,6 +16,8 @@ Invoice agent itself is still a stub (not built yet) — this wires the
 identity gate and interrupt mechanics around where it will plug in.
 """
 
+import logging
+
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -29,12 +31,19 @@ from customer_support.agents.catalog_agent import (
     route_after_catalog_agent,
 )
 
+logger = logging.getLogger(__name__)
+
 
 # --- Preferences: temporary inline stand-ins --------------------------------
 # TODO: move to agents/memory.py once get_preferences/save_preference tools
 # exist in tools/.
 
 def load_preferences_node(state: GraphState) -> dict:
+    logger.info(
+        "load_preferences_node: intents=%s preferences=%s",
+        state.get("intents"),
+        state.get("preferences"),
+    )
     # Replace with:
     #   preferences = get_preferences(state["session_id"], state.get("customer_id"))
     return {"preferences": state.get("preferences", {})}
@@ -45,7 +54,9 @@ def save_preferences_node(state: GraphState) -> dict:
     if signal:
         # Replace with:
         #   save_preference(state.get("customer_id") or state["session_id"], signal)
-        print(f"[stub] would save preference: {signal}")
+        logger.info("save_preferences_node: would save preference: %s", signal)
+    else:
+        logger.info("save_preferences_node: no pending preference signal")
     return {"pending_preference_signal": None}
 
 
@@ -55,6 +66,8 @@ def hitl_verify_node(state: GraphState) -> dict:
     """Pauses the graph and asks the caller for verification info. On
     resume, `verification_input` is whatever was passed to
     Command(resume=...) — e.g. {"customer_id": "123", "last_name": "Diaz"}."""
+
+    logger.info("hitl_verify_node: interrupting to request identity verification")
 
     verification_input = interrupt(
         {
@@ -72,6 +85,8 @@ def hitl_verify_node(state: GraphState) -> dict:
     #                                  verification_input.get("last_name"))
     is_verified = bool(verification_input.get("customer_id"))  # stub
 
+    logger.info("hitl_verify_node: resumed with customer_verified=%s", is_verified)
+
     return {
         "customer_verified": is_verified,
         "customer_id": verification_input.get("customer_id") if is_verified else None,
@@ -80,13 +95,20 @@ def hitl_verify_node(state: GraphState) -> dict:
 
 def route_after_hitl(state: GraphState) -> str:
     # Verified -> proceed to invoice. Still not verified -> ask again.
-    return "invoice_agent" if state["customer_verified"] else "hitl_verify"
+    decision = "invoice_agent" if state["customer_verified"] else "hitl_verify"
+    logger.info(
+        "route_after_hitl: customer_verified=%s -> %s",
+        state["customer_verified"],
+        decision,
+    )
+    return decision
 
 
 # --- Invoice agent: not built yet -------------------------------------------
 
 def invoice_agent_node(state: GraphState) -> dict:
     # TODO: real invoice agent + tool loop, mirroring catalog_agent_node.
+    logger.info("invoice_agent_node: running stub response")
     return {
         "messages": [
             AIMessage(content="[stub] Here's what I'd tell you about your invoice.")
@@ -103,24 +125,40 @@ def dispatch_next_intent(state: GraphState) -> str:
 
     intents = state["intents"]
     if not intents:
+        logger.info("dispatch_next_intent: queue empty -> save_preferences")
         return "save_preferences"
 
     next_intent = intents[0]
     if next_intent == "catalog":
+        logger.info("dispatch_next_intent: intents=%s -> catalog_agent", intents)
         return "catalog_agent"
 
     # invoice
-    return "invoice_agent" if state["customer_verified"] else "hitl_verify"
+    decision = "invoice_agent" if state["customer_verified"] else "hitl_verify"
+    logger.info(
+        "dispatch_next_intent: intents=%s customer_verified=%s -> %s",
+        intents,
+        state["customer_verified"],
+        decision,
+    )
+    return decision
 
 
 def advance_intent_node(state: GraphState) -> dict:
     """Pops the just-completed intent off the front of the queue."""
-    return {"intents": state["intents"][1:]}
+    remaining = state["intents"][1:]
+    logger.info(
+        "advance_intent_node: completed=%s remaining=%s",
+        state["intents"][0] if state["intents"] else None,
+        remaining,
+    )
+    return {"intents": remaining}
 
 
 # --- Build ------------------------------------------------------------------
 
 def build_graph():
+    logger.info("build_graph: assembling graph")
     graph = StateGraph(GraphState)
 
     graph.add_node("router", router_node)
@@ -131,53 +169,75 @@ def build_graph():
     graph.add_node("invoice_agent", invoice_agent_node)
     graph.add_node("advance_intent", advance_intent_node)
     graph.add_node("save_preferences", save_preferences_node)
+    logger.debug(
+        "build_graph: registered nodes: %s",
+        [
+            "router",
+            "load_preferences",
+            "catalog_agent",
+            "catalog_tools",
+            "hitl_verify",
+            "invoice_agent",
+            "advance_intent",
+            "save_preferences",
+        ],
+    )
 
     graph.set_entry_point("router")
-    graph.add_edge("router", "load_preferences")
+    logger.debug("build_graph: entry point -> router")
 
-    graph.add_conditional_edges(
-        "load_preferences",
-        dispatch_next_intent,
-        {
-            "catalog_agent": "catalog_agent",
-            "invoice_agent": "invoice_agent",
-            "hitl_verify": "hitl_verify",
-            "save_preferences": "save_preferences",
-        },
+    graph.add_edge("router", "load_preferences")
+    logger.debug("build_graph: edge router -> load_preferences")
+
+    dispatch_map = {
+        "catalog_agent": "catalog_agent",
+        "invoice_agent": "invoice_agent",
+        "hitl_verify": "hitl_verify",
+        "save_preferences": "save_preferences",
+    }
+
+    graph.add_conditional_edges("load_preferences", dispatch_next_intent, dispatch_map)
+    logger.debug(
+        "build_graph: conditional edges load_preferences -[dispatch_next_intent]-> %s",
+        dispatch_map,
     )
 
     # Catalog: tool loop, then advance to the next intent (if any)
-    graph.add_conditional_edges(
-        "catalog_agent",
-        route_after_catalog_agent,
-        {"catalog_tools": "catalog_tools", "save_preferences": "advance_intent"},
+    catalog_map = {"catalog_tools": "catalog_tools", "save_preferences": "advance_intent"}
+    graph.add_conditional_edges("catalog_agent", route_after_catalog_agent, catalog_map)
+    logger.debug(
+        "build_graph: conditional edges catalog_agent -[route_after_catalog_agent]-> %s",
+        catalog_map,
     )
+
     graph.add_edge("catalog_tools", "catalog_agent")
+    logger.debug("build_graph: edge catalog_tools -> catalog_agent")
 
     # Invoice: identity gate, then advance to the next intent (if any)
-    graph.add_conditional_edges(
-        "hitl_verify",
-        route_after_hitl,
-        {"invoice_agent": "invoice_agent", "hitl_verify": "hitl_verify"},
+    hitl_map = {"invoice_agent": "invoice_agent", "hitl_verify": "hitl_verify"}
+    graph.add_conditional_edges("hitl_verify", route_after_hitl, hitl_map)
+    logger.debug(
+        "build_graph: conditional edges hitl_verify -[route_after_hitl]-> %s",
+        hitl_map,
     )
+
     graph.add_edge("invoice_agent", "advance_intent")
+    logger.debug("build_graph: edge invoice_agent -> advance_intent")
 
     # advance_intent re-runs dispatch on whatever's left in the queue
-    graph.add_conditional_edges(
-        "advance_intent",
-        dispatch_next_intent,
-        {
-            "catalog_agent": "catalog_agent",
-            "invoice_agent": "invoice_agent",
-            "hitl_verify": "hitl_verify",
-            "save_preferences": "save_preferences",
-        },
+    graph.add_conditional_edges("advance_intent", dispatch_next_intent, dispatch_map)
+    logger.debug(
+        "build_graph: conditional edges advance_intent -[dispatch_next_intent]-> %s",
+        dispatch_map,
     )
 
     graph.add_edge("save_preferences", END)
+    logger.debug("build_graph: edge save_preferences -> END")
 
     checkpointer = MemorySaver()
-    return graph.compile(checkpointer=checkpointer)
+    compiled = graph.compile(checkpointer=checkpointer)
+    logger.info("build_graph: graph compiled")
+    return compiled
 
 
 compiled_graph = build_graph()

@@ -9,11 +9,14 @@ explicit preference statement, if any (not a genre mention in a
 request — see preference_signal description).
 """
 
+import logging
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 from customer_support.config import get_llm
 from customer_support.graph.state import GraphState
+
+logger = logging.getLogger(__name__)
 
 
 class IntentClassification(BaseModel):
@@ -69,6 +72,8 @@ def router_node(state: GraphState) -> dict:
     last_message = state["messages"][-1]
     content = getattr(last_message, "content", last_message)
 
+    logger.info("router_node: classifying message: %r", content)
+
     result: IntentClassification = router_llm.invoke(
         [
             {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
@@ -81,6 +86,13 @@ def router_node(state: GraphState) -> dict:
     # This guarantees dispatch_next_intent answers what it can before
     # ever reaching the identity gate.
     ordered_intents = sorted(result.intents, key=lambda i: 0 if i == "catalog" else 1)
+
+    logger.info(
+        "router_node: intents=%s preference_signal=%s reasoning=%s",
+        ordered_intents,
+        result.preference_signal,
+        result.reasoning,
+    )
 
     return {
         "intents": ordered_intents,

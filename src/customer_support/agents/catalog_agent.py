@@ -10,9 +10,10 @@ stock). The loop exits once the model responds without any tool calls,
 and the graph then moves on to save_preferences.
 """
  
+import logging
 from typing import Literal
 from langgraph.prebuilt import ToolNode
- 
+
 from customer_support.config import get_llm
 from customer_support.graph.state import GraphState
 from customer_support.tools.music_catalog_tools import (
@@ -22,6 +23,8 @@ from customer_support.tools.music_catalog_tools import (
     search_songs_by_title,
     get_track_details,
 )  # adjust names to match your actual exports from this module
+
+logger = logging.getLogger(__name__)
 
 CATALOG_TOOLS = [search_albums_by_artist, search_tracks_by_artist, browse_songs_by_genre, search_songs_by_title, get_track_details]
 
@@ -51,26 +54,46 @@ def catalog_agent_node(state: GraphState) -> dict:
             f"Known customer preferences: {preferences or 'none recorded yet'}"
         ),
     }
-    
+
+    logger.info("catalog_agent_node: invoking catalog LLM, preferences=%s", preferences)
+
     response = catalog_llm.invoke([system_message, *state["messages"]])
+
+    tool_calls = getattr(response, "tool_calls", None) or []
+    logger.info(
+        "catalog_agent_node: response has %d tool call(s): %s",
+        len(tool_calls),
+        [call.get("name") for call in tool_calls],
+    )
+
     return {"messages": [response]}
 
 def route_after_catalog_agent(state: GraphState) -> Literal["catalog_tools", "save_preferences"]:
     """Loop back to tools if the model made tool calls, otherwise the
     turn is done and we head to save_preferences.
- 
+
     NOTE: once graph/routing.py exists, move this function there
     alongside the other conditional-edge functions (identity check,
     invoice loop, etc.) so all branching logic lives in one place.
     """
- 
+
     last_message = state["messages"][-1]
-    if getattr(last_message, "tool_calls", None):
-        return "catalog_tools"
-    return "save_preferences"
- 
- 
-catalog_tools_node = ToolNode(CATALOG_TOOLS)
+    decision = "catalog_tools" if getattr(last_message, "tool_calls", None) else "save_preferences"
+    logger.info("route_after_catalog_agent: -> %s", decision)
+    return decision
+
+
+_catalog_tool_runner = ToolNode(CATALOG_TOOLS)
+
+
+def catalog_tools_node(state: GraphState) -> dict:
+    """Executes the tool call(s) requested by catalog_agent_node."""
+    tool_calls = getattr(state["messages"][-1], "tool_calls", None) or []
+    logger.info(
+        "catalog_tools_node: executing tool call(s): %s",
+        [call.get("name") for call in tool_calls],
+    )
+    return _catalog_tool_runner.invoke(state)
  
  
 # --- Graph wiring (goes in graph/build.py) ---------------------------------

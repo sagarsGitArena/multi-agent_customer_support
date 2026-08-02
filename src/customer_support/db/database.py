@@ -1,9 +1,12 @@
 from pathlib import Path
 import json
+import logging
 import requests
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
+
+logger = logging.getLogger(__name__)
 
 
 ##########################################################################
@@ -45,16 +48,16 @@ def download_sql_script() -> Path:
     """
 
     if not SQL_FILE.exists():
-        print("Downloading Chinook SQL script...")
+        logger.info("Downloading Chinook SQL script from %s", CHINOOK_URL)
 
         response = requests.get(CHINOOK_URL, timeout=30)
         response.raise_for_status()
 
         SQL_FILE.write_text(response.text, encoding="utf-8")
-        print("Download complete.")
+        logger.info("Download complete: %s", SQL_FILE)
 
     else:
-        print("Using cached SQL script.")
+        logger.info("Using cached SQL script: %s", SQL_FILE)
 
     return SQL_FILE
 
@@ -71,6 +74,7 @@ def load_database():
     global _database_loaded
 
     if _database_loaded:
+        logger.debug("Database already loaded, skipping.")
         return
 
     sql_file = download_sql_script()
@@ -78,14 +82,12 @@ def load_database():
     sql_script = sql_file.read_text(encoding="utf-8")
 
     with engine.begin() as conn:
-        print(type(conn.connection))
         raw_conn = conn.connection.driver_connection  # underlying sqlite3.Connection
         raw_conn.executescript(sql_script)
 
-
     _database_loaded = True
 
-    print("Chinook database loaded into memory.")
+    logger.info("Chinook database loaded into memory.")
 
 ##########################################################################
 # Safe Query Execution
@@ -99,6 +101,7 @@ def run_query_safe(sql: str, params: dict | None = None) -> str:
     try:
         return execute_query(sql, params)
     except Exception as e:
+        logger.exception("Query failed, returning error payload instead.")
         return json.dumps({"error": str(e)})
 
 
@@ -119,6 +122,7 @@ def execute_query(sql: str, params: dict | None = None) -> str:
     with engine.connect() as conn:
         result = conn.execute(text(sql), params)
         rows = [dict(row) for row in result.mappings().all()]
+        logger.debug("Query returned %d row(s).", len(rows))
         return json.dumps(rows, indent=4)
 
 ##########################################################################
