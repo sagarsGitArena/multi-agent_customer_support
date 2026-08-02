@@ -78,7 +78,7 @@ def route_after_catalog_agent(state: GraphState) -> Literal["catalog_tools", "sa
     """
 
     last_message = state["messages"][-1]
-    decision = "catalog_tools" if getattr(last_message, "tool_calls", None) else "save_preferences"
+    decision = "catalog_tools" if getattr(last_message, "tool_calls", None) else "done"
     logger.info("route_after_catalog_agent: -> %s", decision)
     return decision
 

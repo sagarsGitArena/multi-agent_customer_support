@@ -11,14 +11,10 @@ catalog answer, already appended to state["messages"]) intact. The
 caller shows that plus the verification prompt in one turn, and
 resumes the graph with the customer's next message via
 Command(resume=...).
-
-Invoice agent itself is still a stub (not built yet) — this wires the
-identity gate and interrupt mechanics around where it will plug in.
 """
 
 import logging
 
-from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
@@ -29,6 +25,11 @@ from customer_support.agents.catalog_agent import (
     catalog_agent_node,
     catalog_tools_node,
     route_after_catalog_agent,
+)
+from customer_support.agents.invoice_agent import (
+    invoice_agent_node,
+    invoice_tools_node,
+    route_after_invoice_agent,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,18 +105,6 @@ def route_after_hitl(state: GraphState) -> str:
     return decision
 
 
-# --- Invoice agent: not built yet -------------------------------------------
-
-def invoice_agent_node(state: GraphState) -> dict:
-    # TODO: real invoice agent + tool loop, mirroring catalog_agent_node.
-    logger.info("invoice_agent_node: running stub response")
-    return {
-        "messages": [
-            AIMessage(content="[stub] Here's what I'd tell you about your invoice.")
-        ]
-    }
-
-
 # --- Intent queue: dispatch + advance ---------------------------------------
 
 def dispatch_next_intent(state: GraphState) -> str:
@@ -167,6 +156,7 @@ def build_graph():
     graph.add_node("catalog_tools", catalog_tools_node)
     graph.add_node("hitl_verify", hitl_verify_node)
     graph.add_node("invoice_agent", invoice_agent_node)
+    graph.add_node("invoice_tools", invoice_tools_node)
     graph.add_node("advance_intent", advance_intent_node)
     graph.add_node("save_preferences", save_preferences_node)
     logger.debug(
@@ -178,6 +168,7 @@ def build_graph():
             "catalog_tools",
             "hitl_verify",
             "invoice_agent",
+            "invoice_tools",
             "advance_intent",
             "save_preferences",
         ],
@@ -203,7 +194,11 @@ def build_graph():
     )
 
     # Catalog: tool loop, then advance to the next intent (if any)
-    catalog_map = {"catalog_tools": "catalog_tools", "save_preferences": "advance_intent"}
+    catalog_map = {
+        "catalog_tools": "catalog_tools",
+        "done": "advance_intent",
+    }
+
     graph.add_conditional_edges("catalog_agent", route_after_catalog_agent, catalog_map)
     logger.debug(
         "build_graph: conditional edges catalog_agent -[route_after_catalog_agent]-> %s",
@@ -214,15 +209,31 @@ def build_graph():
     logger.debug("build_graph: edge catalog_tools -> catalog_agent")
 
     # Invoice: identity gate, then advance to the next intent (if any)
-    hitl_map = {"invoice_agent": "invoice_agent", "hitl_verify": "hitl_verify"}
+    hitl_map = {
+        "invoice_agent": "invoice_agent",
+        "hitl_verify": "hitl_verify",
+    }
     graph.add_conditional_edges("hitl_verify", route_after_hitl, hitl_map)
     logger.debug(
         "build_graph: conditional edges hitl_verify -[route_after_hitl]-> %s",
         hitl_map,
     )
 
-    graph.add_edge("invoice_agent", "advance_intent")
-    logger.debug("build_graph: edge invoice_agent -> advance_intent")
+    invoice_map = {
+        "invoice_tools": "invoice_tools",
+        "done": "advance_intent",
+    }
+    # NOTE: this was `add_conditional_edge` (singular) in the version you
+    # pasted — that method doesn't exist on StateGraph and would raise
+    # AttributeError at build time. Fixed to `add_conditional_edges`.
+    graph.add_conditional_edges("invoice_agent", route_after_invoice_agent, invoice_map)
+    logger.debug(
+        "build_graph: conditional edges invoice_agent -[route_after_invoice_agent]-> %s",
+        invoice_map,
+    )
+
+    graph.add_edge("invoice_tools", "invoice_agent")
+    logger.debug("build_graph: edge invoice_tools -> invoice_agent")
 
     # advance_intent re-runs dispatch on whatever's left in the queue
     graph.add_conditional_edges("advance_intent", dispatch_next_intent, dispatch_map)
@@ -274,8 +285,13 @@ if __name__ == "__main__":
         print("Verification needed:", result["__interrupt__"][0].value["message"])
 
         # Turn 2: customer replies with their ID -> resume the graph
+        # result = compiled_graph.invoke(
+        #     Command(resume={"customer_id": "123", "last_name": "Diaz"}),
+        #     config=config,
+        # )
+        # Turn 3: customer replies with their ID -> resume the graph
         result = compiled_graph.invoke(
-            Command(resume={"customer_id": "123", "last_name": "Diaz"}),
+            Command(resume={"customer_id": "43", "last_name": "Mercier"}),
             config=config,
         )
         print("Final:", result["messages"][-1].content)

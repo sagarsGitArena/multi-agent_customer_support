@@ -217,5 +217,5 @@ def get_invoice_line_items(invoice_id: str) -> str:
 
     result = execute_query(query, params)
     if not json.loads(result):
-        return not_found(f"No line items found for invoice ID: {invoice_id}")
+        return not_found(f"now that{invoice_id}")
     return result
