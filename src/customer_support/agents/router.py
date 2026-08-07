@@ -14,7 +14,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 from customer_support.config import get_llm
-from customer_support.graph.state import GraphState
+from customer_support.graph.state import GraphState, format_state
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,8 @@ router_llm = get_llm().with_structured_output(IntentClassification)
 def router_node(state: GraphState) -> dict:
     """Classify all intents in the latest customer message and return
     a partial state update. LangGraph merges this into the full state."""
+
+    logger.info("router_node: state=\n%s", format_state(state))
 
     last_message = state["messages"][-1]
     content = getattr(last_message, "content", last_message)

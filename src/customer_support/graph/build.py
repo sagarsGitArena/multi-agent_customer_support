@@ -19,7 +19,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 
-from customer_support.graph.state import GraphState
+from customer_support.graph.state import GraphState, format_state
 from customer_support.agents.router import router_node
 from customer_support.agents.catalog_agent import (
     catalog_agent_node,
@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 # exist in tools/.
 
 def load_preferences_node(state: GraphState) -> dict:
+    logger.info("load_preferences_node: state=\n%s", format_state(state))
     logger.info(
         "load_preferences_node: intents=%s preferences=%s",
         state.get("intents"),
@@ -51,6 +52,8 @@ def load_preferences_node(state: GraphState) -> dict:
 
 
 def save_preferences_node(state: GraphState) -> dict:
+    logger.info("save_preferences_node: state=\n%s", format_state(state))
+
     signal = state.get("pending_preference_signal")
     if signal:
         # Replace with:
@@ -68,6 +71,7 @@ def hitl_verify_node(state: GraphState) -> dict:
     resume, `verification_input` is whatever was passed to
     Command(resume=...) — e.g. {"customer_id": "123", "last_name": "Diaz"}."""
 
+    logger.info("hitl_verify_node: state=\n%s", format_state(state))
     logger.info("hitl_verify_node: interrupting to request identity verification")
 
     verification_input = interrupt(
@@ -135,6 +139,8 @@ def dispatch_next_intent(state: GraphState) -> str:
 
 def advance_intent_node(state: GraphState) -> dict:
     """Pops the just-completed intent off the front of the queue."""
+    logger.info("advance_intent_node: state=\n%s", format_state(state))
+
     remaining = state["intents"][1:]
     logger.info(
         "advance_intent_node: completed=%s remaining=%s",
@@ -284,16 +290,16 @@ if __name__ == "__main__":
         print("Catalog answer so far:", result["messages"][-1].content)
         print("Verification needed:", result["__interrupt__"][0].value["message"])
 
-        # Turn 2: customer replies with their ID -> resume the graph
-        # result = compiled_graph.invoke(
-        #     Command(resume={"customer_id": "123", "last_name": "Diaz"}),
-        #     config=config,
-        # )
-        # Turn 3: customer replies with their ID -> resume the graph
+        #Turn 2: customer replies with their ID -> resume the graph
         result = compiled_graph.invoke(
-            Command(resume={"customer_id": "43", "last_name": "Mercier"}),
+            Command(resume={"customer_id": "123", "last_name": "Diaz"}),
             config=config,
         )
-        print("Final:", result["messages"][-1].content)
+        # Turn 3: customer replies with their ID -> resume the graph
+        # result = compiled_graph.invoke(
+        #     Command(resume={"customer_id": "43", "last_name": "Mercier"}),
+        #     config=config,
+        # )
+        # print("Final:", result["messages"][-1].content)
     else:
         print(result["messages"][-1].content)

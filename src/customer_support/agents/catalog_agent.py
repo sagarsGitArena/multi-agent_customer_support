@@ -15,7 +15,7 @@ from typing import Literal
 from langgraph.prebuilt import ToolNode
 
 from customer_support.config import get_llm
-from customer_support.graph.state import GraphState
+from customer_support.graph.state import GraphState, format_state
 from customer_support.tools.music_catalog_tools import (
     search_albums_by_artist,
     search_tracks_by_artist,
@@ -37,7 +37,10 @@ store. You can search the catalog, look up tracks and artists, and \
 recommend music. Use the customer's known preferences to personalize \
 recommendations when relevant, but don't force them in if they're not \
 relevant to the question. Call tools as needed before answering — don't \
-guess at catalog details you haven't looked up."""
+guess at catalog details you haven't looked up. Stay in the catalog scope and do not attempt to answer outside of catalog scope."""
+# If asked about orders, \
+# invoices, or billing, note that's handled separately and don't attempt \
+# to answer it here."""
 
 catalog_llm = get_llm().bind_tools(CATALOG_TOOLS)
 
@@ -46,6 +49,8 @@ def catalog_agent_node(state: GraphState) -> dict:
     message containing tool calls, which routes to catalog_tools next,
     or a plain answer, which routes on to save_preferences."""
     
+    logger.info("catalog_agent_node: state=\n%s", format_state(state))
+
     preferences = state.get("preferences", {})
     system_message = {
         "role": "system",
@@ -88,6 +93,8 @@ _catalog_tool_runner = ToolNode(CATALOG_TOOLS)
 
 def catalog_tools_node(state: GraphState) -> dict:
     """Executes the tool call(s) requested by catalog_agent_node."""
+    logger.info("catalog_tools_node: state=\n%s", format_state(state))
+
     tool_calls = getattr(state["messages"][-1], "tool_calls", None) or []
     logger.info(
         "catalog_tools_node: executing tool call(s): %s",

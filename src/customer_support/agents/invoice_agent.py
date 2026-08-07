@@ -26,7 +26,7 @@ from typing import Literal
 from langchain_core.messages import ToolMessage
 
 from customer_support.config import get_llm
-from customer_support.graph.state import GraphState
+from customer_support.graph.state import GraphState, format_state
 from customer_support.tools.invoice_tools import (
     get_customer_invoices,
     get_customer_purchased_tracks,
@@ -67,6 +67,8 @@ def invoice_agent_node(state: GraphState) -> dict:
     customer_verified is already True and customer_id is set — the
     graph's routing guarantees this node is never reached otherwise."""
 
+    logger.info("invoice_agent_node: state=\n%s", format_state(state))
+
     system_message = {
         "role": "system",
         "content": _invoice_system_prompt(state["customer_id"]),
@@ -106,6 +108,8 @@ def _owned_invoice_ids(customer_id: str) -> set:
 def invoice_tools_node(state: GraphState) -> dict:
     """Executes whatever tool calls the agent just made, enforcing
     that the verified customer can only see their own data."""
+
+    logger.info("invoice_tools_node: state=\n%s", format_state(state))
 
     customer_id = state["customer_id"]
     last_message = state["messages"][-1]
