@@ -17,6 +17,7 @@ import logging
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.memory import InMemoryStore
 from langgraph.types import interrupt
 
 from customer_support.graph.state import GraphState, format_state
@@ -31,37 +32,9 @@ from customer_support.agents.invoice_agent import (
     invoice_tools_node,
     route_after_invoice_agent,
 )
+from customer_support.agents.memory import load_memory_node, create_memory_node
 
 logger = logging.getLogger(__name__)
-
-
-# --- Preferences: temporary inline stand-ins --------------------------------
-# TODO: move to agents/memory.py once get_preferences/save_preference tools
-# exist in tools/.
-
-def load_preferences_node(state: GraphState) -> dict:
-    logger.info("load_preferences_node: state=\n%s", format_state(state))
-    logger.info(
-        "load_preferences_node: intents=%s preferences=%s",
-        state.get("intents"),
-        state.get("preferences"),
-    )
-    # Replace with:
-    #   preferences = get_preferences(state["session_id"], state.get("customer_id"))
-    return {"preferences": state.get("preferences", {})}
-
-
-def save_preferences_node(state: GraphState) -> dict:
-    logger.info("save_preferences_node: state=\n%s", format_state(state))
-
-    signal = state.get("pending_preference_signal")
-    if signal:
-        # Replace with:
-        #   save_preference(state.get("customer_id") or state["session_id"], signal)
-        logger.info("save_preferences_node: would save preference: %s", signal)
-    else:
-        logger.info("save_preferences_node: no pending preference signal")
-    return {"pending_preference_signal": None}
 
 
 # --- Identity gate: HITL verify --------------------------------------------
@@ -113,13 +86,13 @@ def route_after_hitl(state: GraphState) -> str:
 
 def dispatch_next_intent(state: GraphState) -> str:
     """Looks at the front of the intent queue and decides where to go.
-    Used after load_preferences AND after advance_intent, so it's the
+    Used after load_memory AND after advance_intent, so it's the
     single place that knows how to route any given intent."""
 
     intents = state["intents"]
     if not intents:
-        logger.info("dispatch_next_intent: queue empty -> save_preferences")
-        return "save_preferences"
+        logger.info("dispatch_next_intent: queue empty -> create_memory")
+        return "create_memory"
 
     next_intent = intents[0]
     if next_intent == "catalog":
@@ -157,45 +130,45 @@ def build_graph():
     graph = StateGraph(GraphState)
 
     graph.add_node("router", router_node)
-    graph.add_node("load_preferences", load_preferences_node)
+    graph.add_node("load_memory", load_memory_node)
     graph.add_node("catalog_agent", catalog_agent_node)
     graph.add_node("catalog_tools", catalog_tools_node)
     graph.add_node("hitl_verify", hitl_verify_node)
     graph.add_node("invoice_agent", invoice_agent_node)
     graph.add_node("invoice_tools", invoice_tools_node)
     graph.add_node("advance_intent", advance_intent_node)
-    graph.add_node("save_preferences", save_preferences_node)
+    graph.add_node("create_memory", create_memory_node)
     logger.debug(
         "build_graph: registered nodes: %s",
         [
             "router",
-            "load_preferences",
+            "load_memory",
             "catalog_agent",
             "catalog_tools",
             "hitl_verify",
             "invoice_agent",
             "invoice_tools",
             "advance_intent",
-            "save_preferences",
+            "create_memory",
         ],
     )
 
     graph.set_entry_point("router")
     logger.debug("build_graph: entry point -> router")
 
-    graph.add_edge("router", "load_preferences")
-    logger.debug("build_graph: edge router -> load_preferences")
+    graph.add_edge("router", "load_memory")
+    logger.debug("build_graph: edge router -> load_memory")
 
     dispatch_map = {
         "catalog_agent": "catalog_agent",
         "invoice_agent": "invoice_agent",
         "hitl_verify": "hitl_verify",
-        "save_preferences": "save_preferences",
+        "create_memory": "create_memory",
     }
 
-    graph.add_conditional_edges("load_preferences", dispatch_next_intent, dispatch_map)
+    graph.add_conditional_edges("load_memory", dispatch_next_intent, dispatch_map)
     logger.debug(
-        "build_graph: conditional edges load_preferences -[dispatch_next_intent]-> %s",
+        "build_graph: conditional edges load_memory -[dispatch_next_intent]-> %s",
         dispatch_map,
     )
 
@@ -248,15 +221,16 @@ def build_graph():
         dispatch_map,
     )
 
-    graph.add_edge("save_preferences", END)
-    logger.debug("build_graph: edge save_preferences -> END")
+    graph.add_edge("create_memory", END)
+    logger.debug("build_graph: edge create_memory -> END")
 
     checkpointer = MemorySaver()
-    compiled = graph.compile(checkpointer=checkpointer)
+    compiled = graph.compile(checkpointer=checkpointer, store=memory_store)
     logger.info("build_graph: graph compiled")
     return compiled
 
 
+memory_store = InMemoryStore()
 compiled_graph = build_graph()
 
 
@@ -278,8 +252,6 @@ if __name__ == "__main__":
             "customer_id": None,
             "customer_verified": False,
             "intents": [],
-            "pending_preference_signal": None,
-            "preferences": {},
         },
         config=config,
     )

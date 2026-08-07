@@ -10,7 +10,7 @@ intent at a time, popping the front of the list as each is handled.
 """
 
 import pprint
-from typing import Literal, Optional
+from typing import Optional
 from typing_extensions import Annotated, TypedDict
 from langgraph.graph.message import add_messages
 
@@ -23,8 +23,7 @@ class GraphState(TypedDict):
     customer_verified: bool
 
     intents: list  # queue of Literal["catalog", "invoice"], processed front to back
-    pending_preference_signal: Optional[str]
-    preferences: dict
+    preferences_context: Optional[str]  # formatted "Music Preferences: ..." string, or None
 
 
 def format_state(state: "GraphState") -> str:

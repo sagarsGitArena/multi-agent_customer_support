@@ -4,13 +4,14 @@ Router node for the catalog / invoice agentic graph.
 Location: src/customer_support/agents/router.py
 
 Extracts ALL intents present in the message, not just one — a query
-can ask about catalog and invoice in the same turn. Also flags an
-explicit preference statement, if any (not a genre mention in a
-request — see preference_signal description).
+can ask about catalog and invoice in the same turn. Preference
+extraction is handled separately, by create_memory_node
+(agents/memory.py), which looks at recent conversation history rather
+than just the latest message.
 """
 
 import logging
-from typing import Literal, Optional
+from typing import Literal
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
@@ -34,17 +35,6 @@ class IntentClassification(BaseModel):
             "e.g. catalog availability AND an order/invoice question."
         )
     )
-    preference_signal: Optional[str] = Field(
-        default=None,
-        description=(
-            "ONLY set this if the customer explicitly states a lasting "
-            "preference using language like 'I like', 'I love', 'I prefer', "
-            "'my favorite is', or similar. Do NOT set this just because a "
-            "genre, artist, or product was mentioned in a request — "
-            "'play me some rock' or 'find rock albums' is a one-off request, "
-            "not a preference, and must be left null."
-        ),
-    )
     reasoning: str = Field(description="One sentence explaining the classification.")
 
 
@@ -60,15 +50,8 @@ present in it.
 A message can contain both — list every intent that applies, in the \
 order the customer raised them. If the message is unrelated to both \
 (e.g. small talk, weather, or anything outside a music store's scope), \
-leave intents empty.
-
-For preference_signal: only capture it when the customer explicitly \
-states a lasting like/love/preference (e.g. "I love jazz", "I prefer \
-email receipts"). A request that merely mentions a genre or product \
-(e.g. "play me some rock", "do you have any jazz albums") is NOT a \
-preference — leave preference_signal null in that case, even though \
-the intent classification itself is unaffected. Do not answer the \
-customer's question yourself — only classify."""
+leave intents empty. Do not answer the customer's question yourself — \
+only classify."""
 
 router_llm = get_llm().with_structured_output(IntentClassification)
 
@@ -95,15 +78,13 @@ def router_node(state: GraphState) -> dict:
     ordered_intents = sorted(result.intents, key=lambda i: 0 if i == "invoice" else 1)
 
     logger.info(
-        "router_node: intents=%s preference_signal=%s reasoning=%s",
+        "router_node: intents=%s reasoning=%s",
         ordered_intents,
-        result.preference_signal,
         result.reasoning,
     )
 
     update: dict = {
         "intents": ordered_intents,
-        "pending_preference_signal": result.preference_signal,
     }
 
     if not ordered_intents:

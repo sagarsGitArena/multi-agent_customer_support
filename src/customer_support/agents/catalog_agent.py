@@ -7,7 +7,7 @@ This is a small agent loop, not a single LLM call: the model can call
 catalog tools, see the results, and call more tools before answering
 (e.g. look up an artist, then check whether a specific track is in
 stock). The loop exits once the model responds without any tool calls,
-and the graph then moves on to save_preferences.
+and the graph then moves on to create_memory.
 """
  
 import logging
@@ -47,20 +47,24 @@ catalog_llm = get_llm().bind_tools(CATALOG_TOOLS)
 def catalog_agent_node(state: GraphState) -> dict:
     """Runs the catalog LLM with preferences in context. May return a
     message containing tool calls, which routes to catalog_tools next,
-    or a plain answer, which routes on to save_preferences."""
-    
+    or a plain answer, which routes on to create_memory."""
+
     logger.info("catalog_agent_node: state=\n%s", format_state(state))
 
-    preferences = state.get("preferences", {})
+    preferences_context = state.get("preferences_context")
     system_message = {
         "role": "system",
         "content": (
             f"{CATALOG_SYSTEM_PROMPT}\n\n"
-            f"Known customer preferences: {preferences or 'none recorded yet'}"
+            f"Known customer preferences: "
+            f"{preferences_context or 'No saved preferences for this customer yet.'}"
         ),
     }
 
-    logger.info("catalog_agent_node: invoking catalog LLM, preferences=%s", preferences)
+    logger.info(
+        "catalog_agent_node: invoking catalog LLM, preferences_context=%s",
+        preferences_context,
+    )
 
     response = catalog_llm.invoke([system_message, *state["messages"]])
 
@@ -73,9 +77,9 @@ def catalog_agent_node(state: GraphState) -> dict:
 
     return {"messages": [response]}
 
-def route_after_catalog_agent(state: GraphState) -> Literal["catalog_tools", "save_preferences"]:
+def route_after_catalog_agent(state: GraphState) -> Literal["catalog_tools", "create_memory"]:
     """Loop back to tools if the model made tool calls, otherwise the
-    turn is done and we head to save_preferences.
+    turn is done and we head to create_memory.
 
     NOTE: once graph/routing.py exists, move this function there
     alongside the other conditional-edge functions (identity check,
@@ -115,7 +119,7 @@ def catalog_tools_node(state: GraphState) -> dict:
 #   graph.add_conditional_edges(
 #       "catalog_agent",
 #       route_after_catalog_agent,
-#       {"catalog_tools": "catalog_tools", "save_preferences": "save_preferences"},
+#       {"catalog_tools": "catalog_tools", "create_memory": "create_memory"},
 #   )
 #   graph.add_edge("catalog_tools", "catalog_agent")  # loop back after tool results
  
