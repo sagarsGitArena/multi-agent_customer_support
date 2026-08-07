@@ -93,6 +93,21 @@ def _format_preferences(music_preferences: list[str]) -> Optional[str]:
     return "Music Preferences: " + ", ".join(music_preferences)
 
 
+def _merge_preferences(existing: list[str], new: list[str]) -> list[str]:
+    """Case/whitespace-insensitive union: "AC/DC" and "ac/dc" are the
+    same preference, not two. Existing entries are processed first, so
+    their casing wins on a conflict -- a saved preference's display
+    form never changes just because the customer later types it
+    differently."""
+
+    merged: dict[str, str] = {}
+    for pref in [*existing, *new]:
+        key = pref.strip().lower()
+        if key and key not in merged:
+            merged[key] = pref.strip()
+    return sorted(merged.values(), key=str.lower)
+
+
 def load_memory_node(state: GraphState) -> dict:
     """Reads the verified customer's saved preferences from the store
     and formats them for injection into the music agent's prompt. If
@@ -182,9 +197,7 @@ def create_memory_node(state: GraphState) -> dict:
     existing_item = store.get(namespace, MEMORY_KEY)
     existing = existing_item.value.get("music_preferences", []) if existing_item else []
 
-    # NOTE: exact-string dedup, so e.g. "AC/DC" and "ac/dc" would be
-    # stored as two separate entries -- not handled here.
-    merged = sorted(set(existing) | set(new_preferences))
+    merged = _merge_preferences(existing, new_preferences)
     profile = UserProfile(customer_id=customer_id, music_preferences=merged)
 
     store.put(namespace, MEMORY_KEY, profile.model_dump())
