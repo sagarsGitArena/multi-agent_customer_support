@@ -285,21 +285,21 @@ if __name__ == "__main__":
     )
 
     if "__interrupt__" in result:
-        # Catalog answer is already in result["messages"]; the interrupt
-        # payload carries the verification prompt to show alongside it.
-        print("Catalog answer so far:", result["messages"][-1].content)
+        # Mixed queries handle invoice first, so on an unverified customer
+        # the graph interrupts here before catalog has run at all -- there's
+        # no answer yet, just the verification prompt.
         print("Verification needed:", result["__interrupt__"][0].value["message"])
 
-        #Turn 2: customer replies with their ID -> resume the graph
-        result = compiled_graph.invoke(
-            Command(resume={"customer_id": "123", "last_name": "Diaz"}),
-            config=config,
-        )
-        # Turn 3: customer replies with their ID -> resume the graph
+        # #Turn 2: customer replies with their ID -> resume the graph
         # result = compiled_graph.invoke(
-        #     Command(resume={"customer_id": "43", "last_name": "Mercier"}),
+        #     Command(resume={"customer_id": "123", "last_name": "Diaz"}),
         #     config=config,
         # )
-        # print("Final:", result["messages"][-1].content)
+        #Turn 3: customer replies with their ID -> resume the graph
+        result = compiled_graph.invoke(
+            Command(resume={"customer_id": "43", "last_name": "Mercier"}),
+            config=config,
+        )
+        print("Final:", result["messages"][-1].content)
     else:
         print(result["messages"][-1].content)

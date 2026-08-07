@@ -11,12 +11,18 @@ request — see preference_signal description).
 
 import logging
 from typing import Literal, Optional
+from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
 from customer_support.config import get_llm
 from customer_support.graph.state import GraphState, format_state
 
 logger = logging.getLogger(__name__)
+
+OFF_TOPIC_REJECTION = (
+    "I can only help with questions about our music catalog or your orders "
+    "and invoices. Could you ask something related to one of those?"
+)
 
 
 class IntentClassification(BaseModel):
@@ -52,7 +58,9 @@ present in it.
   or billing history.
 
 A message can contain both — list every intent that applies, in the \
-order the customer raised them.
+order the customer raised them. If the message is unrelated to both \
+(e.g. small talk, weather, or anything outside a music store's scope), \
+leave intents empty.
 
 For preference_signal: only capture it when the customer explicitly \
 states a lasting like/love/preference (e.g. "I love jazz", "I prefer \
@@ -83,11 +91,8 @@ def router_node(state: GraphState) -> dict:
         ]
     )
 
-    # Catalog is never gated, invoice always might be — so catalog goes
-    # first regardless of the order the customer mentioned them in.
-    # This guarantees dispatch_next_intent answers what it can before
-    # ever reaching the identity gate.
-    ordered_intents = sorted(result.intents, key=lambda i: 0 if i == "catalog" else 1)
+    # Mixed queries are handled invoice-first, then catalog.
+    ordered_intents = sorted(result.intents, key=lambda i: 0 if i == "invoice" else 1)
 
     logger.info(
         "router_node: intents=%s preference_signal=%s reasoning=%s",
@@ -96,7 +101,13 @@ def router_node(state: GraphState) -> dict:
         result.reasoning,
     )
 
-    return {
+    update: dict = {
         "intents": ordered_intents,
         "pending_preference_signal": result.preference_signal,
     }
+
+    if not ordered_intents:
+        logger.info("router_node: no in-scope intent detected, rejecting off-topic query")
+        update["messages"] = [AIMessage(content=OFF_TOPIC_REJECTION)]
+
+    return update
