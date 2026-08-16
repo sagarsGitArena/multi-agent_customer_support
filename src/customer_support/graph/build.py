@@ -20,6 +20,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import interrupt
 
+from customer_support.db import find_customer_id_by_email, find_customer_id_by_phone
 from customer_support.graph.state import GraphState, format_state
 from customer_support.agents.router import router_node
 from customer_support.agents.catalog_agent import catalog_subgraph
@@ -34,7 +35,15 @@ logger = logging.getLogger(__name__)
 def hitl_verify_node(state: GraphState) -> dict:
     """Pauses the graph and asks the caller for verification info. On
     resume, `verification_input` is whatever was passed to
-    Command(resume=...) — e.g. {"customer_id": "123", "last_name": "Diaz"}."""
+    Command(resume=...) — e.g. {"customer_id": "123", "last_name": "Diaz"},
+    {"email": "isabelle_mercier@apple.fr"}, or {"phone": "+33 3 80 73 66 99"}.
+
+    The three identifiers aren't checked with equal rigor: a customer_id
+    is trusted as-is (stub -- confirms *a* value was given, not that it
+    belongs to the person typing), while email and phone are actually
+    looked up against the Customer table -- case-insensitively for
+    email, formatting-insensitively for phone -- so either only resolves
+    to customer_verified=True if it matches a real account."""
 
     logger.info("hitl_verify_node: state=\n%s", format_state(state))
     logger.info("hitl_verify_node: interrupting to request identity verification")
@@ -44,22 +53,35 @@ def hitl_verify_node(state: GraphState) -> dict:
             "reason": "identity_verification_required",
             "message": (
                 "To help with your order or invoice, I need to verify "
-                "your identity first — can you share your customer ID "
-                "and last name?"
+                "your identity first — can you share your customer ID, "
+                "the email, or the phone number on your account?"
             ),
         }
     )
 
-    # Replace with your real check, e.g. a DB lookup tool:
-    #   is_verified = verify_customer(verification_input.get("customer_id"),
-    #                                  verification_input.get("last_name"))
-    is_verified = bool(verification_input.get("customer_id"))  # stub
+    customer_id = verification_input.get("customer_id")
+    email = verification_input.get("email")
+    phone = verification_input.get("phone")
+
+    if not customer_id and email:
+        customer_id = find_customer_id_by_email(email)
+        logger.info(
+            "hitl_verify_node: looked up email=%r -> customer_id=%s", email, customer_id
+        )
+
+    if not customer_id and phone:
+        customer_id = find_customer_id_by_phone(phone)
+        logger.info(
+            "hitl_verify_node: looked up phone=%r -> customer_id=%s", phone, customer_id
+        )
+
+    is_verified = bool(customer_id)  # stub for the customer_id path; see docstring
 
     logger.info("hitl_verify_node: resumed with customer_verified=%s", is_verified)
 
     return {
         "customer_verified": is_verified,
-        "customer_id": verification_input.get("customer_id") if is_verified else None,
+        "customer_id": customer_id if is_verified else None,
     }
 
 
