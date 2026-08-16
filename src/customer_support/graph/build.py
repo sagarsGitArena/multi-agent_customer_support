@@ -22,16 +22,8 @@ from langgraph.types import interrupt
 
 from customer_support.graph.state import GraphState, format_state
 from customer_support.agents.router import router_node
-from customer_support.agents.catalog_agent import (
-    catalog_agent_node,
-    catalog_tools_node,
-    route_after_catalog_agent,
-)
-from customer_support.agents.invoice_agent import (
-    invoice_agent_node,
-    invoice_tools_node,
-    route_after_invoice_agent,
-)
+from customer_support.agents.catalog_agent import catalog_subgraph
+from customer_support.agents.invoice_agent import invoice_subgraph
 from customer_support.agents.memory import load_memory_node, create_memory_node
 
 logger = logging.getLogger(__name__)
@@ -131,11 +123,9 @@ def build_graph():
 
     graph.add_node("router", router_node)
     graph.add_node("load_memory", load_memory_node)
-    graph.add_node("catalog_agent", catalog_agent_node)
-    graph.add_node("catalog_tools", catalog_tools_node)
+    graph.add_node("catalog_agent", catalog_subgraph)
     graph.add_node("hitl_verify", hitl_verify_node)
-    graph.add_node("invoice_agent", invoice_agent_node)
-    graph.add_node("invoice_tools", invoice_tools_node)
+    graph.add_node("invoice_agent", invoice_subgraph)
     graph.add_node("advance_intent", advance_intent_node)
     graph.add_node("create_memory", create_memory_node)
     logger.debug(
@@ -144,10 +134,8 @@ def build_graph():
             "router",
             "load_memory",
             "catalog_agent",
-            "catalog_tools",
             "hitl_verify",
             "invoice_agent",
-            "invoice_tools",
             "advance_intent",
             "create_memory",
         ],
@@ -172,20 +160,11 @@ def build_graph():
         dispatch_map,
     )
 
-    # Catalog: tool loop, then advance to the next intent (if any)
-    catalog_map = {
-        "catalog_tools": "catalog_tools",
-        "done": "advance_intent",
-    }
-
-    graph.add_conditional_edges("catalog_agent", route_after_catalog_agent, catalog_map)
-    logger.debug(
-        "build_graph: conditional edges catalog_agent -[route_after_catalog_agent]-> %s",
-        catalog_map,
-    )
-
-    graph.add_edge("catalog_tools", "catalog_agent")
-    logger.debug("build_graph: edge catalog_tools -> catalog_agent")
+    # Catalog: the tool loop is internal to catalog_subgraph; from the
+    # parent's perspective it's a single node, so just advance to the
+    # next intent (if any) once it returns.
+    graph.add_edge("catalog_agent", "advance_intent")
+    logger.debug("build_graph: edge catalog_agent -> advance_intent")
 
     # Invoice: identity gate, then advance to the next intent (if any)
     hitl_map = {
@@ -198,21 +177,11 @@ def build_graph():
         hitl_map,
     )
 
-    invoice_map = {
-        "invoice_tools": "invoice_tools",
-        "done": "advance_intent",
-    }
-    # NOTE: this was `add_conditional_edge` (singular) in the version you
-    # pasted — that method doesn't exist on StateGraph and would raise
-    # AttributeError at build time. Fixed to `add_conditional_edges`.
-    graph.add_conditional_edges("invoice_agent", route_after_invoice_agent, invoice_map)
-    logger.debug(
-        "build_graph: conditional edges invoice_agent -[route_after_invoice_agent]-> %s",
-        invoice_map,
-    )
-
-    graph.add_edge("invoice_tools", "invoice_agent")
-    logger.debug("build_graph: edge invoice_tools -> invoice_agent")
+    # Invoice: the tool loop and ownership enforcement are internal to
+    # invoice_subgraph; from the parent's perspective it's a single node,
+    # so just advance to the next intent (if any) once it returns.
+    graph.add_edge("invoice_agent", "advance_intent")
+    logger.debug("build_graph: edge invoice_agent -> advance_intent")
 
     # advance_intent re-runs dispatch on whatever's left in the queue
     graph.add_conditional_edges("advance_intent", dispatch_next_intent, dispatch_map)

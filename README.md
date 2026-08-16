@@ -10,10 +10,10 @@ requests.
 ## Overview
 
 A router classifies each incoming message into `catalog` and/or `invoice`
-intent(s). Catalog questions are answered by a hand-built tool-calling loop
-against the music catalog. Invoice/order questions require identity
-verification first (a human-in-the-loop interrupt) and are then answered by
-a second tool-calling loop that's hard-scoped to the verified customer's own
+intent(s). Catalog questions are answered by a hand-built ReAct loop
+(LLM + tools) compiled as its own subgraph. Invoice/order questions require
+identity verification first (a human-in-the-loop interrupt) and are then
+answered by a second subgraph, hard-scoped to the verified customer's own
 data. A preference-memory node extracts and persists explicit taste
 statements ("I love jazz") so later catalog answers can reference them.
 Off-topic messages ("what's the weather?") are rejected directly, without
@@ -22,21 +22,26 @@ invoking either agent.
 ## Architecture
 
 ```
-START -> router -> load_memory -> dispatch
-                                     |
-                 +-------------------+-------------------+
-                 |                   |                   |
-           catalog_agent       hitl_verify           (queue empty)
-           (+ catalog_tools     (interrupt,               |
-            tool loop)          waits for ID)         create_memory
-                 |                   |                    |
-                 +--> advance_intent <--- invoice_agent    |
-                      (pop queue,     (+ invoice_tools     |
-                       loop back to    tool loop)          |
-                       dispatch)           |                |
-                                           +---> advance_intent
-                                                     |
-                                              create_memory -> END
+START -> router -> load_memory
+                       |
+              dispatch_next_intent   (one conditional-edge function,
+                       |              reused below by advance_intent)
+     +---------+-------+-------+---------+
+     |         |               |         |
+ catalog   invoice,        invoice,    queue
+ intent   unverified       verified    empty
+     |         |               |         |
+     v         v               v         v
+catalog_agent  hitl_verify --> invoice_agent   create_memory
+[subgraph]     (interrupt,     [subgraph]           |
+    |          waits for ID;        |                |
+    |          loops on itself      |                |
+    |          until verified)      |                |
+    |               |               |                |
+    +---> advance_intent <----------+                |
+          (pop queue, loop back                       |
+           to dispatch_next_intent)                    v
+                                                       END
 ```
 
 - **router** (`agents/router.py`) — classifies intent(s) via structured LLM
@@ -49,17 +54,28 @@ START -> router -> load_memory -> dispatch
   the start of a turn; extract any *new* explicit preference statements
   from the recent conversation and merge them (never overwrite) at the end
   of a turn, via LangGraph's `InMemoryStore`, keyed by `customer_id`.
-- **catalog_agent** (`agents/catalog_agent.py`) — a hand-built tool-calling
-  loop over 5 catalog tools (search by artist/genre/title, track details).
-  Deliberately out of scope for order/invoice questions.
+- **catalog_agent** (`agents/catalog_agent.py`) — a hand-built ReAct loop
+  (LLM bound to 5 catalog tools: search by artist/genre/title, track
+  details) compiled as its own `StateGraph` and added to the parent graph
+  as a single node. It's fully self-contained: its state is just
+  `messages` + `preferences_context`, nothing about customer identity or
+  verification. Deliberately out of scope for order/invoice questions.
 - **hitl_verify** (`graph/build.py`) — pauses the graph via LangGraph's
   `interrupt()` and asks for a customer ID + last name before any invoice
-  data is touched.
-- **invoice_agent** (`agents/invoice_agent.py`) — a second tool-calling loop
-  over 4 invoice tools. Ownership is enforced in code (not just prompted):
-  the verified `customer_id` is force-substituted into tool calls, and
-  results that don't belong to that customer are rejected before being
-  shown.
+  data is touched. Stays a flat node (not a subgraph) — it's a single
+  interrupt-and-branch step, not a multi-node loop worth encapsulating.
+- **invoice_agent** (`agents/invoice_agent.py`) — a second ReAct loop, also
+  compiled as its own subgraph, over 4 invoice tools. Unlike catalog, its
+  state also takes `customer_id` as an input, because ownership enforcement
+  needs it: the verified `customer_id` is force-substituted into tool
+  calls, and results that don't belong to that customer are rejected
+  before being shown.
+
+Both agent subgraphs hide their internal `agent <-> tools` loop behind one
+`done` exit — from the parent graph's perspective, `catalog_agent` and
+`invoice_agent` are each a single opaque node, tested independently of the
+rest of the graph (`tests/test_catalog_agent.py`,
+`tests/test_invoice_agent.py`).
 
 State persistence uses two independent in-memory stores: a `MemorySaver`
 checkpointer scopes **conversation history** per `thread_id` (one per
@@ -118,8 +134,16 @@ uv run pytest tests/ -v
 # or: pytest tests/ -v
 ```
 
-72 tests covering the database layer, catalog/invoice tools, JSON response
-validity, and utility functions.
+80 tests covering the database layer, catalog/invoice tools, JSON response
+validity, and utility functions, plus:
+
+- `test_catalog_agent.py` / `test_invoice_agent.py` — the two agent
+  subgraphs invoked standalone (no parent graph, no checkpointer), covering
+  the tool-call loop, the no-results path, and (invoice only) cross-customer
+  ownership rejection.
+- `test_graph_flow.py` — the full compiled graph end-to-end: a catalog-only
+  turn that never touches the identity gate, and an invoice turn that
+  interrupts for verification and resumes via `Command(resume=...)`.
 
 ## Sample usage
 

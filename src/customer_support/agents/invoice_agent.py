@@ -18,15 +18,25 @@ happens entirely in invoice_tools_node, not by redefining the tools:
 - get_invoice_line_items: its result has no customer info at all, so
   ownership is checked BEFORE calling it, against the customer's own
   invoice IDs (fetched via get_customer_invoices).
+
+Built as a standalone subgraph (`invoice_subgraph`, at the bottom).
+Unlike catalog, invoice can't be fully self-contained -- ownership
+enforcement needs the verified customer_id, so InvoiceState takes
+that as an input field alongside messages. The parent graph only
+ever routes here once hitl_verify has set customer_id, so it's
+always present by the time this subgraph runs.
 """
 
 import json
 import logging
-from typing import Literal
+from typing import Literal, Optional
+from typing_extensions import Annotated, TypedDict
 from langchain_core.messages import ToolMessage
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
 
 from customer_support.config import get_llm
-from customer_support.graph.state import GraphState, format_state
+from customer_support.graph.state import format_state
 from customer_support.tools.invoice_tools import (
     get_customer_invoices,
     get_customer_purchased_tracks,
@@ -46,6 +56,14 @@ INVOICE_TOOLS = [
 TOOLS_BY_NAME = {t.name: t for t in INVOICE_TOOLS}
 
 
+class InvoiceState(TypedDict):
+    """Narrow state for the invoice subgraph -- messages plus the one
+    piece of parent state ownership enforcement actually needs."""
+
+    messages: Annotated[list, add_messages]
+    customer_id: Optional[str]
+
+
 def _invoice_system_prompt(customer_id: str) -> str:
     return f"""You are the invoice and order assistant for a music \
 store. The customer's identity has already been verified — you do \
@@ -62,7 +80,7 @@ separately and don't attempt to answer it here."""
 invoice_llm = get_llm().bind_tools(INVOICE_TOOLS)
 
 
-def invoice_agent_node(state: GraphState) -> dict:
+def invoice_agent_node(state: InvoiceState) -> dict:
     """Runs the invoice LLM with your real tools bound as-is. Assumes
     customer_verified is already True and customer_id is set — the
     graph's routing guarantees this node is never reached otherwise."""
@@ -105,7 +123,7 @@ def _owned_invoice_ids(customer_id: str) -> set:
     return {str(row.get("invoice_id")) for row in rows if row.get("invoice_id") is not None}
 
 
-def invoice_tools_node(state: GraphState) -> dict:
+def invoice_tools_node(state: InvoiceState) -> dict:
     """Executes whatever tool calls the agent just made, enforcing
     that the verified customer can only see their own data."""
 
@@ -169,21 +187,33 @@ def invoice_tools_node(state: GraphState) -> dict:
     return {"messages": tool_messages}
 
 
-def route_after_invoice_agent(state: GraphState) -> Literal["invoice_tools", "advance_intent"]:
+def route_after_invoice_agent(state: InvoiceState) -> Literal["invoice_tools", "done"]:
     last_message = state["messages"][-1]
     decision = "invoice_tools" if getattr(last_message, "tool_calls", None) else "done"
     logger.info("route_after_invoice_agent: -> %s", decision)
     return decision
 
 
-# --- Graph wiring (goes in graph/build.py) ---------------------------------
+# --- Subgraph assembly ------------------------------------------------------
 #
-#   graph.add_node("invoice_agent", invoice_agent_node)
-#   graph.add_node("invoice_tools", invoice_tools_node)
-#
-#   graph.add_conditional_edges(
-#       "invoice_agent",
-#       route_after_invoice_agent,
-#       {"invoice_tools": "invoice_tools", "advance_intent": "advance_intent"},
-#   )
-#   graph.add_edge("invoice_tools", "invoice_agent")
+# Compiled once at import time and added to the parent graph as a single
+# node (see graph/build.py): graph.add_node("invoice_agent", invoice_subgraph)
+
+def _build_invoice_subgraph():
+    graph = StateGraph(InvoiceState)
+
+    graph.add_node("invoice_agent", invoice_agent_node)
+    graph.add_node("invoice_tools", invoice_tools_node)
+
+    graph.set_entry_point("invoice_agent")
+    graph.add_conditional_edges(
+        "invoice_agent",
+        route_after_invoice_agent,
+        {"invoice_tools": "invoice_tools", "done": END},
+    )
+    graph.add_edge("invoice_tools", "invoice_agent")
+
+    return graph.compile()
+
+
+invoice_subgraph = _build_invoice_subgraph()

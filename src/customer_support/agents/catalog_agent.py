@@ -1,21 +1,30 @@
 """
 Catalog agent node for the music store agentic graph.
- 
+
 Location: src/customer_support/agents/catalog_agent.py
- 
+
 This is a small agent loop, not a single LLM call: the model can call
 catalog tools, see the results, and call more tools before answering
 (e.g. look up an artist, then check whether a specific track is in
-stock). The loop exits once the model responds without any tool calls,
-and the graph then moves on to create_memory.
+stock). The loop exits once the model responds without any tool calls.
+
+Built as a standalone subgraph (`catalog_subgraph`, at the bottom):
+unlike invoice, catalog needs nothing from the parent state except
+`messages` and `preferences_context`, so it's compiled with its own
+narrow CatalogState and added to the parent graph as a single node --
+the parent's routing table never has to know the internal
+catalog_agent <-> catalog_tools loop exists.
 """
- 
+
 import logging
-from typing import Literal
+from typing import Literal, Optional
+from typing_extensions import Annotated, TypedDict
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from customer_support.config import get_llm
-from customer_support.graph.state import GraphState, format_state
+from customer_support.graph.state import format_state
 from customer_support.tools.music_catalog_tools import (
     search_albums_by_artist,
     search_tracks_by_artist,
@@ -27,6 +36,14 @@ from customer_support.tools.music_catalog_tools import (
 logger = logging.getLogger(__name__)
 
 CATALOG_TOOLS = [search_albums_by_artist, search_tracks_by_artist, browse_songs_by_genre, search_songs_by_title, get_track_details]
+
+
+class CatalogState(TypedDict):
+    """Narrow state for the catalog subgraph -- just what the loop
+    actually reads/writes, not the full parent GraphState."""
+
+    messages: Annotated[list, add_messages]
+    preferences_context: Optional[str]
 
 
 
@@ -44,10 +61,10 @@ guess at catalog details you haven't looked up. Stay in the catalog scope and do
 
 catalog_llm = get_llm().bind_tools(CATALOG_TOOLS)
 
-def catalog_agent_node(state: GraphState) -> dict:
+def catalog_agent_node(state: CatalogState) -> dict:
     """Runs the catalog LLM with preferences in context. May return a
     message containing tool calls, which routes to catalog_tools next,
-    or a plain answer, which routes on to create_memory."""
+    or a plain answer, which ends the subgraph."""
 
     logger.info("catalog_agent_node: state=\n%s", format_state(state))
 
@@ -77,14 +94,10 @@ def catalog_agent_node(state: GraphState) -> dict:
 
     return {"messages": [response]}
 
-def route_after_catalog_agent(state: GraphState) -> Literal["catalog_tools", "create_memory"]:
-    """Loop back to tools if the model made tool calls, otherwise the
-    turn is done and we head to create_memory.
 
-    NOTE: once graph/routing.py exists, move this function there
-    alongside the other conditional-edge functions (identity check,
-    invoice loop, etc.) so all branching logic lives in one place.
-    """
+def route_after_catalog_agent(state: CatalogState) -> Literal["catalog_tools", "done"]:
+    """Loop back to tools if the model made tool calls, otherwise the
+    subgraph is done."""
 
     last_message = state["messages"][-1]
     decision = "catalog_tools" if getattr(last_message, "tool_calls", None) else "done"
@@ -95,7 +108,7 @@ def route_after_catalog_agent(state: GraphState) -> Literal["catalog_tools", "cr
 _catalog_tool_runner = ToolNode(CATALOG_TOOLS)
 
 
-def catalog_tools_node(state: GraphState) -> dict:
+def catalog_tools_node(state: CatalogState) -> dict:
     """Executes the tool call(s) requested by catalog_agent_node."""
     logger.info("catalog_tools_node: state=\n%s", format_state(state))
 
@@ -105,21 +118,28 @@ def catalog_tools_node(state: GraphState) -> dict:
         [call.get("name") for call in tool_calls],
     )
     return _catalog_tool_runner.invoke(state)
- 
- 
-# --- Graph wiring (goes in graph/build.py) ---------------------------------
+
+
+# --- Subgraph assembly ------------------------------------------------------
 #
-#   from customer_support.agents.catalog_agent import (
-#       catalog_agent_node, catalog_tools_node, route_after_catalog_agent,
-#   )
-#
-#   graph.add_node("catalog_agent", catalog_agent_node)
-#   graph.add_node("catalog_tools", catalog_tools_node)
-#
-#   graph.add_conditional_edges(
-#       "catalog_agent",
-#       route_after_catalog_agent,
-#       {"catalog_tools": "catalog_tools", "create_memory": "create_memory"},
-#   )
-#   graph.add_edge("catalog_tools", "catalog_agent")  # loop back after tool results
- 
+# Compiled once at import time and added to the parent graph as a single
+# node (see graph/build.py): graph.add_node("catalog_agent", catalog_subgraph)
+
+def _build_catalog_subgraph():
+    graph = StateGraph(CatalogState)
+
+    graph.add_node("catalog_agent", catalog_agent_node)
+    graph.add_node("catalog_tools", catalog_tools_node)
+
+    graph.set_entry_point("catalog_agent")
+    graph.add_conditional_edges(
+        "catalog_agent",
+        route_after_catalog_agent,
+        {"catalog_tools": "catalog_tools", "done": END},
+    )
+    graph.add_edge("catalog_tools", "catalog_agent")
+
+    return graph.compile()
+
+
+catalog_subgraph = _build_catalog_subgraph()
