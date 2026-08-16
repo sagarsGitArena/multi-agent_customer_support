@@ -16,6 +16,7 @@ from langgraph.graph.message import add_messages
 
 
 class GraphState(TypedDict):
+    ## List of  LangChain messages objects(HumanMessage, AIMessage, ToolMessage , etc)
     messages: Annotated[list, add_messages]
 
     session_id: str
@@ -34,8 +35,15 @@ def format_state(state: "GraphState") -> str:
     printable = dict(state)
     messages = printable.get("messages")
     if messages is not None:
-        printable["messages"] = [
-            f"{type(m).__name__}(content={getattr(m, 'content', m)!r})"
-            for m in messages
-        ]
+        printable["messages"] = [_format_message(m) for m in messages]
     return pprint.pformat(printable, indent=2, width=100, sort_dicts=False)
+
+
+def _format_message(m) -> str:
+    tool_calls = getattr(m, "tool_calls", None)
+    if tool_calls:
+        calls = ", ".join(
+            f"{call.get('name')}({call.get('args')})" for call in tool_calls
+        )
+        return f"{type(m).__name__}(content={getattr(m, 'content', m)!r}, tool_calls=[{calls}])"
+    return f"{type(m).__name__}(content={getattr(m, 'content', m)!r})"
