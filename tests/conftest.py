@@ -1,3 +1,7 @@
+import os
+
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+
 import pytest
 
 from customer_support.db import load_database

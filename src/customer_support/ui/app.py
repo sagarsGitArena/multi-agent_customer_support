@@ -1,7 +1,7 @@
 """
 Gradio chat interface for the customer support agentic graph.
 
-Location: app.py
+Location: src/customer_support/ui/app.py
 
 Each browser session gets its own thread_id (a UUID stored in gr.State,
 generated once per session via demo.load). The checkpointer scopes
@@ -36,11 +36,28 @@ def _config_for(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
+PHONE_PATTERN = re.compile(r"[+(]?\d[\d\s\-().]{5,}\d")
+
+
 def _parse_verification_reply(text: str) -> dict:
-    """Pulls a customer_id + last name out of free text. hitl_verify_node's
-    identity check is itself a stub (is_verified = bool(customer_id)) --
-    this matches that fidelity rather than building real NLU for a
-    placeholder verifier."""
+    """Pulls an email, a phone number, or a customer_id + last name out
+    of free text. Email and phone take priority over a bare number --
+    hitl_verify_node actually looks those up against the Customer
+    table, whereas a bare customer_id is still trusted as-is (a stub,
+    not real auth).
+
+    Phone numbers are told apart from a bare customer_id by digit
+    count (>=6): this project's customer IDs top out at two digits, so
+    a longer run of digits (with or without typical phone punctuation)
+    is a phone number, not an ID."""
+
+    email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)
+    if email_match:
+        return {"email": email_match.group()}
+
+    phone_match = PHONE_PATTERN.search(text)
+    if phone_match and len(re.sub(r"\D", "", phone_match.group())) >= 6:
+        return {"phone": phone_match.group()}
 
     match = re.search(r"\d+", text)
     customer_id = match.group() if match else None

@@ -6,6 +6,8 @@ import requests
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
+from customer_support.db.utils import normalize_phone
+
 logger = logging.getLogger(__name__)
 
 
@@ -124,6 +126,56 @@ def execute_query(sql: str, params: dict | None = None) -> str:
         rows = [dict(row) for row in result.mappings().all()]
         logger.debug("Query returned %d row(s).", len(rows))
         return json.dumps(rows, indent=4)
+
+##########################################################################
+# Identity Lookup
+##########################################################################
+
+def find_customer_id_by_email(email: str) -> str | None:
+    """
+    Looks up a customer by email, case-insensitively.
+
+    Returns:
+        The customer's ID as a string, or None if no customer has
+        that email.
+    """
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT CustomerId FROM Customer WHERE LOWER(Email) = LOWER(:email)"),
+            {"email": email.strip()},
+        ).mappings().first()
+
+    return str(row["CustomerId"]) if row else None
+
+
+def find_customer_id_by_phone(phone: str) -> str | None:
+    """
+    Looks up a customer by phone number, ignoring formatting
+    differences (spaces, dashes, parens, a leading '+') on both sides.
+
+    Stored numbers are heavily punctuated (e.g. "+33 03 80 73 66 99"),
+    and there's no reliable way to normalize that SQL-side in SQLite,
+    so this fetches the (small, demo-scale) customer list and compares
+    normalized digits in Python via the same normalize_phone() used
+    elsewhere -- one definition of "same number", not two.
+    """
+
+    target = normalize_phone(phone).lstrip("+")
+    if not target:
+        return None
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT CustomerId, Phone FROM Customer WHERE Phone IS NOT NULL")
+        ).mappings().all()
+
+    for row in rows:
+        if normalize_phone(row["Phone"]).lstrip("+") == target:
+            return str(row["CustomerId"])
+
+    return None
+
 
 ##########################################################################
 # Health Check

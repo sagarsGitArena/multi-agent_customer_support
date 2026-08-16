@@ -6,11 +6,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src ./src
-COPY app.py .
 COPY cache ./cache
 
 ENV PYTHONPATH=/app/src
 
 EXPOSE 7860
 
-CMD ["python", "app.py"]
+CMD ["python", "-m", "customer_support.ui.app"]

@@ -92,17 +92,3 @@ def router_node(state: GraphState) -> dict:
         update["messages"] = [AIMessage(content=OFF_TOPIC_REJECTION)]
 
     return update
-
-def route_after_catalog_agent(state: GraphState) -> Literal["catalog_tools", "create_memory"]:
-    """Loop back to tools if the model made tool calls, otherwise the
-    turn is done and we head to create_memory.
-
-    NOTE: once graph/routing.py exists, move this function there
-    alongside the other conditional-edge functions (identity check,
-    invoice loop, etc.) so all branching logic lives in one place.
-    """
-
-    last_message = state["messages"][-1]
-    decision = "catalog_tools" if getattr(last_message, "tool_calls", None) else "done"
-    logger.info("route_after_catalog_agent: -> %s", decision)
-    return decision

@@ -20,18 +20,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import interrupt
 
+from customer_support.db import find_customer_id_by_email, find_customer_id_by_phone
 from customer_support.graph.state import GraphState, format_state
 from customer_support.agents.router import router_node
-from customer_support.agents.catalog_agent import (
-    catalog_agent_node,
-    catalog_tools_node,
-    route_after_catalog_agent,
-)
-from customer_support.agents.invoice_agent import (
-    invoice_agent_node,
-    invoice_tools_node,
-    route_after_invoice_agent,
-)
+from customer_support.agents.catalog_agent import catalog_subgraph
+from customer_support.agents.invoice_agent import invoice_subgraph
 from customer_support.agents.memory import load_memory_node, create_memory_node
 
 logger = logging.getLogger(__name__)
@@ -42,7 +35,15 @@ logger = logging.getLogger(__name__)
 def hitl_verify_node(state: GraphState) -> dict:
     """Pauses the graph and asks the caller for verification info. On
     resume, `verification_input` is whatever was passed to
-    Command(resume=...) — e.g. {"customer_id": "123", "last_name": "Diaz"}."""
+    Command(resume=...) — e.g. {"customer_id": "123", "last_name": "Diaz"},
+    {"email": "isabelle_mercier@apple.fr"}, or {"phone": "+33 3 80 73 66 99"}.
+
+    The three identifiers aren't checked with equal rigor: a customer_id
+    is trusted as-is (stub -- confirms *a* value was given, not that it
+    belongs to the person typing), while email and phone are actually
+    looked up against the Customer table -- case-insensitively for
+    email, formatting-insensitively for phone -- so either only resolves
+    to customer_verified=True if it matches a real account."""
 
     logger.info("hitl_verify_node: state=\n%s", format_state(state))
     logger.info("hitl_verify_node: interrupting to request identity verification")
@@ -52,22 +53,35 @@ def hitl_verify_node(state: GraphState) -> dict:
             "reason": "identity_verification_required",
             "message": (
                 "To help with your order or invoice, I need to verify "
-                "your identity first — can you share your customer ID "
-                "and last name?"
+                "your identity first — can you share your customer ID, "
+                "the email, or the phone number on your account?"
             ),
         }
     )
 
-    # Replace with your real check, e.g. a DB lookup tool:
-    #   is_verified = verify_customer(verification_input.get("customer_id"),
-    #                                  verification_input.get("last_name"))
-    is_verified = bool(verification_input.get("customer_id"))  # stub
+    customer_id = verification_input.get("customer_id")
+    email = verification_input.get("email")
+    phone = verification_input.get("phone")
+
+    if not customer_id and email:
+        customer_id = find_customer_id_by_email(email)
+        logger.info(
+            "hitl_verify_node: looked up email=%r -> customer_id=%s", email, customer_id
+        )
+
+    if not customer_id and phone:
+        customer_id = find_customer_id_by_phone(phone)
+        logger.info(
+            "hitl_verify_node: looked up phone=%r -> customer_id=%s", phone, customer_id
+        )
+
+    is_verified = bool(customer_id)  # stub for the customer_id path; see docstring
 
     logger.info("hitl_verify_node: resumed with customer_verified=%s", is_verified)
 
     return {
         "customer_verified": is_verified,
-        "customer_id": verification_input.get("customer_id") if is_verified else None,
+        "customer_id": customer_id if is_verified else None,
     }
 
 
@@ -131,11 +145,9 @@ def build_graph():
 
     graph.add_node("router", router_node)
     graph.add_node("load_memory", load_memory_node)
-    graph.add_node("catalog_agent", catalog_agent_node)
-    graph.add_node("catalog_tools", catalog_tools_node)
+    graph.add_node("catalog_agent", catalog_subgraph)
     graph.add_node("hitl_verify", hitl_verify_node)
-    graph.add_node("invoice_agent", invoice_agent_node)
-    graph.add_node("invoice_tools", invoice_tools_node)
+    graph.add_node("invoice_agent", invoice_subgraph)
     graph.add_node("advance_intent", advance_intent_node)
     graph.add_node("create_memory", create_memory_node)
     logger.debug(
@@ -144,10 +156,8 @@ def build_graph():
             "router",
             "load_memory",
             "catalog_agent",
-            "catalog_tools",
             "hitl_verify",
             "invoice_agent",
-            "invoice_tools",
             "advance_intent",
             "create_memory",
         ],
@@ -172,20 +182,11 @@ def build_graph():
         dispatch_map,
     )
 
-    # Catalog: tool loop, then advance to the next intent (if any)
-    catalog_map = {
-        "catalog_tools": "catalog_tools",
-        "done": "advance_intent",
-    }
-
-    graph.add_conditional_edges("catalog_agent", route_after_catalog_agent, catalog_map)
-    logger.debug(
-        "build_graph: conditional edges catalog_agent -[route_after_catalog_agent]-> %s",
-        catalog_map,
-    )
-
-    graph.add_edge("catalog_tools", "catalog_agent")
-    logger.debug("build_graph: edge catalog_tools -> catalog_agent")
+    # Catalog: the tool loop is internal to catalog_subgraph; from the
+    # parent's perspective it's a single node, so just advance to the
+    # next intent (if any) once it returns.
+    graph.add_edge("catalog_agent", "advance_intent")
+    logger.debug("build_graph: edge catalog_agent -> advance_intent")
 
     # Invoice: identity gate, then advance to the next intent (if any)
     hitl_map = {
@@ -198,21 +199,11 @@ def build_graph():
         hitl_map,
     )
 
-    invoice_map = {
-        "invoice_tools": "invoice_tools",
-        "done": "advance_intent",
-    }
-    # NOTE: this was `add_conditional_edge` (singular) in the version you
-    # pasted — that method doesn't exist on StateGraph and would raise
-    # AttributeError at build time. Fixed to `add_conditional_edges`.
-    graph.add_conditional_edges("invoice_agent", route_after_invoice_agent, invoice_map)
-    logger.debug(
-        "build_graph: conditional edges invoice_agent -[route_after_invoice_agent]-> %s",
-        invoice_map,
-    )
-
-    graph.add_edge("invoice_tools", "invoice_agent")
-    logger.debug("build_graph: edge invoice_tools -> invoice_agent")
+    # Invoice: the tool loop and ownership enforcement are internal to
+    # invoice_subgraph; from the parent's perspective it's a single node,
+    # so just advance to the next intent (if any) once it returns.
+    graph.add_edge("invoice_agent", "advance_intent")
+    logger.debug("build_graph: edge invoice_agent -> advance_intent")
 
     # advance_intent re-runs dispatch on whatever's left in the queue
     graph.add_conditional_edges("advance_intent", dispatch_next_intent, dispatch_map)
