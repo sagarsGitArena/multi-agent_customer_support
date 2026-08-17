@@ -143,7 +143,7 @@ uv run pytest tests/ -v
 # or: pytest tests/ -v
 ```
 
-102 tests covering the database layer, catalog/invoice tools, JSON response
+118 tests covering the database layer, catalog/invoice tools, JSON response
 validity, and utility functions, plus:
 
 - `test_catalog_agent.py` / `test_invoice_agent.py` — the two agent
@@ -151,13 +151,16 @@ validity, and utility functions, plus:
   the tool-call loop, the no-results path, and (invoice only) cross-customer
   ownership rejection.
 - `test_graph_flow.py` — the full compiled graph end-to-end: a catalog-only
-  turn that never touches the identity gate, and invoice turns that
-  interrupt for verification and resume via `Command(resume=...)` across
-  all three identifiers (customer ID, email, phone) — including an
-  unknown email/phone correctly re-prompting instead of verifying.
-- `test_app.py` — `_parse_verification_reply`'s free-text parsing: email
-  and phone extraction take priority over a bare customer ID, and a
-  short digit run (a customer ID) is never mistaken for a phone number.
+  turn that never touches the identity gate, invoice turns that interrupt
+  for verification and resume via `Command(resume=...)` across all three
+  identifiers, and the identity-capture/preference-persistence scenarios
+  described below.
+- `test_app.py` — `_parse_verification_reply`'s free-text parsing, and
+  `send_message` surfacing every sub-agent's answer in a mixed-intent turn.
+- `test_router.py` — intent classification with recent conversation
+  context, including the off-topic-mid-conversation regression check.
+- `test_database.py::TestConcurrentQueries` — parallel tool calls against
+  the shared SQLite connection.
 
 ## Sample usage
 
@@ -198,3 +201,60 @@ reappears once the same customer verifies again in a new session).
   Conversation" instead of replying) leaves that thread's paused
   checkpoint in memory indefinitely — harmless for a demo, but would need
   explicit cleanup/expiry in a long-running production deployment.
+
+## Bugs found and fixed during testing
+
+The automated test suite catches regressions in individual tools and
+nodes, but several real bugs only surfaced through actual multi-turn
+conversation testing — most involved cross-turn state or concurrency,
+which single-call unit tests don't exercise. Each has a regression test
+in `tests/` guarding against recurrence.
+
+- **Mixed-intent turns silently dropped one agent's answer.** A question
+  touching both catalog and invoice runs both subgraphs in sequence, each
+  producing its own final answer — but `send_message` (`ui/app.py`) only
+  ever showed `messages[-1]`, the last one processed (catalog), dropping
+  the first (invoice) without any error. Fixed by collecting every new
+  `AIMessage` produced during the turn, not just the last.
+- **Concurrent tool calls corrupted the database connection.**
+  LangGraph's `ToolNode` runs multiple tool calls from one message in
+  real parallel threads (e.g. checking two saved-preference genres at
+  once) — but the DB is a single shared SQLite `:memory:` connection
+  (`StaticPool`, required to keep the in-memory data alive at all across
+  threads), which isn't safe for simultaneous access. Two threads
+  querying at once corrupted each other's cursor state, raising
+  `IndexError`. Fixed with a `threading.Lock()` around every function
+  that touches the shared connection (`db/database.py`).
+- **Identity stated in the very first message was ignored.** "my
+  customer id is 43, where's my order?" always triggered a redundant
+  verification prompt, because `hitl_verify_node` interrupted
+  unconditionally without checking whether the triggering message
+  already contained an identifier. Fixed with a pre-check against the
+  triggering message before ever asking (`graph/build.py`).
+- **A bare preference reply was rejected as off-topic.** "I love jazz,"
+  replying to "what are you interested in?", was misclassified because
+  the router only ever saw the single latest message, with no way to
+  know it was answering a question. Fixed by including recent
+  conversation history in classification (`agents/router.py`) — the
+  system prompt is explicit that history is for interpreting the latest
+  message only, so an unrelated new message stays off-topic regardless
+  of what came before.
+- **Identity was never captured outside the invoice flow.** `customer_id`
+  was only ever set by `hitl_verify_node`, which only runs for unverified
+  invoice questions — so a catalog-only conversation had no way to ever
+  establish who the customer was, even if they volunteered their ID.
+  Stated preferences could never be saved, and previously-saved ones
+  could never be fetched, in a conversation that never asked an invoice
+  question. Fixed by moving opportunistic identity capture into
+  `load_memory_node` (`agents/memory.py`), which runs on every turn
+  regardless of intent — factored into a shared `identity.py` module to
+  avoid a circular import between `graph/build.py` and `agents/memory.py`.
+- **Catalog recommendations inferred an unstated "taste" from purchase
+  history.** Because `catalog_agent` receives the full shared
+  conversation, it could read an earlier invoice answer's purchase list
+  off the transcript and assert the customer's "diverse taste" as fact —
+  never something they actually said, and a different mechanism entirely
+  from the explicit-statement-only preference system. Fixed with an
+  explicit grounding rule in `CATALOG_SYSTEM_PROMPT`
+  (`agents/catalog_agent.py`) restricting personalization to
+  `preferences_context` only.
