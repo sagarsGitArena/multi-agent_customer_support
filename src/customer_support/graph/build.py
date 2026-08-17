@@ -20,7 +20,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import interrupt
 
-from customer_support.db import find_customer_id_by_email, find_customer_id_by_phone
+from customer_support.identity import extract_identity_from_message, resolve_customer_id
 from customer_support.graph.state import GraphState, format_state
 from customer_support.agents.router import router_node
 from customer_support.agents.catalog_agent import catalog_subgraph
@@ -33,49 +33,54 @@ logger = logging.getLogger(__name__)
 # --- Identity gate: HITL verify --------------------------------------------
 
 def hitl_verify_node(state: GraphState) -> dict:
-    """Pauses the graph and asks the caller for verification info. On
-    resume, `verification_input` is whatever was passed to
+    """Pauses the graph and asks the caller for verification info --
+    unless the message that triggered this turn already contains a
+    usable identifier (e.g. "my customer id is 43, where's my
+    order?"), in which case it verifies immediately without asking at
+    all. In practice this is now mostly a fallback/safety net:
+    load_memory_node (agents/memory.py) already attempts the same
+    capture on every turn, before intent dispatch even happens, so by
+    the time this node is reached customer_id is often already set.
+
+    On resume, `verification_input` is whatever was passed to
     Command(resume=...) — e.g. {"customer_id": "123", "last_name": "Diaz"},
     {"email": "isabelle_mercier@apple.fr"}, or {"phone": "+33 3 80 73 66 99"}.
 
-    The three identifiers aren't checked with equal rigor: a customer_id
-    is trusted as-is (stub -- confirms *a* value was given, not that it
-    belongs to the person typing), while email and phone are actually
-    looked up against the Customer table -- case-insensitively for
-    email, formatting-insensitively for phone -- so either only resolves
-    to customer_verified=True if it matches a real account."""
+    The pre-check and the interrupt() call happen in the same pass
+    deliberately: if the pre-check finds nothing (or finds something
+    that doesn't verify), it falls straight through to interrupt()
+    right here rather than returning unverified and relying on
+    route_after_hitl to loop back -- looping back would just re-run
+    this same pre-check against the same unchanged message forever
+    and never actually pause to ask."""
 
     logger.info("hitl_verify_node: state=\n%s", format_state(state))
-    logger.info("hitl_verify_node: interrupting to request identity verification")
 
-    verification_input = interrupt(
-        {
-            "reason": "identity_verification_required",
-            "message": (
-                "To help with your order or invoice, I need to verify "
-                "your identity first — can you share your customer ID, "
-                "the email, or the phone number on your account?"
-            ),
-        }
-    )
+    triggering_message = state["messages"][-1]
+    triggering_content = getattr(triggering_message, "content", "") or ""
 
-    customer_id = verification_input.get("customer_id")
-    email = verification_input.get("email")
-    phone = verification_input.get("phone")
+    verification_input = extract_identity_from_message(triggering_content)
+    customer_id = resolve_customer_id(verification_input)
 
-    if not customer_id and email:
-        customer_id = find_customer_id_by_email(email)
+    if customer_id:
         logger.info(
-            "hitl_verify_node: looked up email=%r -> customer_id=%s", email, customer_id
+            "hitl_verify_node: found identifier already in the triggering message, skipping interrupt"
         )
-
-    if not customer_id and phone:
-        customer_id = find_customer_id_by_phone(phone)
-        logger.info(
-            "hitl_verify_node: looked up phone=%r -> customer_id=%s", phone, customer_id
+    else:
+        logger.info("hitl_verify_node: interrupting to request identity verification")
+        verification_input = interrupt(
+            {
+                "reason": "identity_verification_required",
+                "message": (
+                    "To help with your order or invoice, I need to verify "
+                    "your identity first — can you share your customer ID, "
+                    "the email, or the phone number on your account?"
+                ),
+            }
         )
+        customer_id = resolve_customer_id(verification_input)
 
-    is_verified = bool(customer_id)  # stub for the customer_id path; see docstring
+    is_verified = bool(customer_id)
 
     logger.info("hitl_verify_node: resumed with customer_verified=%s", is_verified)
 

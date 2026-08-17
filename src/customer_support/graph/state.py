@@ -12,6 +12,7 @@ intent at a time, popping the front of the list as each is handled.
 import pprint
 from typing import Optional
 from typing_extensions import Annotated, TypedDict
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.message import add_messages
 
 
@@ -47,3 +48,33 @@ def _format_message(m) -> str:
         )
         return f"{type(m).__name__}(content={getattr(m, 'content', m)!r}, tool_calls=[{calls}])"
     return f"{type(m).__name__}(content={getattr(m, 'content', m)!r})"
+
+
+def recent_text_messages(messages: list, limit: int) -> list[dict]:
+    """Filters to Human/AI messages with non-empty content FIRST, then
+    takes the last `limit` -- not the other way around. Slicing the raw
+    message list first risks pushing the very human statement callers
+    care about out of the window on tool-call-heavy turns (a
+    multi-step catalog/invoice loop can inject many ToolMessages
+    between two real conversational turns). Shared by router_node
+    (recent context for intent classification) and create_memory_node
+    (recent context for preference extraction).
+
+    Reconstructs plain role/content dicts rather than reusing the
+    LangChain message objects: an AIMessage that still carries
+    tool_calls (even alongside real content) would make this an
+    invalid message sequence for a plain-text LLM call once its paired
+    ToolMessages have been filtered out of the window. Stripping to
+    content-only dicts sidesteps that entirely.
+    """
+
+    filtered = []
+    for m in messages:
+        content = getattr(m, "content", None)
+        if not content or not isinstance(content, str) or not content.strip():
+            continue
+        if isinstance(m, HumanMessage):
+            filtered.append({"role": "user", "content": content})
+        elif isinstance(m, AIMessage):
+            filtered.append({"role": "assistant", "content": content})
+    return filtered[-limit:]

@@ -18,10 +18,12 @@ import time
 import uuid
 
 import gradio as gr
+from langchain_core.messages import AIMessage
 from langgraph.types import Command
 
 from customer_support.config import PORT
 from customer_support.graph.build import compiled_graph
+from customer_support.identity import extract_email, extract_phone
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +38,6 @@ def _config_for(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
-PHONE_PATTERN = re.compile(r"[+(]?\d[\d\s\-().]{5,}\d")
-
-
 def _parse_verification_reply(text: str) -> dict:
     """Pulls an email, a phone number, or a customer_id + last name out
     of free text. Email and phone take priority over a bare number --
@@ -46,18 +45,19 @@ def _parse_verification_reply(text: str) -> dict:
     table, whereas a bare customer_id is still trusted as-is (a stub,
     not real auth).
 
-    Phone numbers are told apart from a bare customer_id by digit
-    count (>=6): this project's customer IDs top out at two digits, so
-    a longer run of digits (with or without typical phone punctuation)
-    is a phone number, not an ID."""
+    Unlike hitl_verify_node's own pre-check against the message that
+    triggers a turn, this runs on a direct reply to "what's your ID?"
+    -- so a bare digit run is unambiguously the answer, not just a
+    number that happens to appear in an arbitrary sentence, and is
+    accepted as a customer_id without requiring an explicit label."""
 
-    email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)
-    if email_match:
-        return {"email": email_match.group()}
+    email = extract_email(text)
+    if email:
+        return {"email": email}
 
-    phone_match = PHONE_PATTERN.search(text)
-    if phone_match and len(re.sub(r"\D", "", phone_match.group())) >= 6:
-        return {"phone": phone_match.group()}
+    phone = extract_phone(text)
+    if phone:
+        return {"phone": phone}
 
     match = re.search(r"\d+", text)
     customer_id = match.group() if match else None
@@ -78,6 +78,11 @@ def send_message(user_message, history, thread_id):
 
     try:
         snap = compiled_graph.get_state(config)
+        # Messages already in the thread before this turn -- used below
+        # to isolate just what THIS turn added, since a mixed-intent
+        # turn can run more than one sub-agent and each appends its own
+        # final answer.
+        prior_message_count = len(snap.values.get("messages", [])) if snap.values else 0
 
         if snap.next:
             # Graph is paused at hitl_verify from a previous turn -- resume
@@ -138,7 +143,15 @@ def send_message(user_message, history, thread_id):
         history = history + [{"role": "assistant", "content": message}]
         yield history, "", thread_id, "⏳ Waiting for your input"
     else:
-        answer = snap.values["messages"][-1].content
+        # A mixed-intent turn (e.g. catalog + invoice) runs more than one
+        # sub-agent, and each produces its own final AIMessage -- taking
+        # only messages[-1] silently drops every answer but the last.
+        # Collect every new, non-empty AIMessage this turn produced.
+        new_messages = snap.values["messages"][prior_message_count:]
+        answers = [
+            m.content for m in new_messages if isinstance(m, AIMessage) and m.content
+        ]
+        answer = "\n\n".join(answers) if answers else "I didn't get a response for that."
         history = history + [{"role": "assistant", "content": answer}]
         yield history, "", thread_id, f"✅ Answered in {elapsed:.1f}s"
 
