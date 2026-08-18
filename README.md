@@ -143,7 +143,7 @@ uv run pytest tests/ -v
 # or: pytest tests/ -v
 ```
 
-118 tests covering the database layer, catalog/invoice tools, JSON response
+119 tests covering the database layer, catalog/invoice tools, JSON response
 validity, and utility functions, plus:
 
 - `test_catalog_agent.py` / `test_invoice_agent.py` — the two agent
@@ -258,3 +258,13 @@ in `tests/` guarding against recurrence.
   explicit grounding rule in `CATALOG_SYSTEM_PROMPT`
   (`agents/catalog_agent.py`) restricting personalization to
   `preferences_context` only.
+- **A mixed-intent answer contradicted itself.** `invoice_agent`'s prompt
+  told it to proactively decline any catalog part of the question ("I
+  can't help with albums..."), which made sense when its answer was
+  shown alone — but once mixed-intent answers are joined into one reply
+  (see the first bug above), that disclaimer sat right next to
+  `catalog_agent`'s own correct answer to the exact question it just
+  said it couldn't help with. Fixed by telling `invoice_agent` to
+  silently ignore the catalog part rather than comment on it
+  (`agents/invoice_agent.py`), since a separate answer to it is always
+  generated anyway.

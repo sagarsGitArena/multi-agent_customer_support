@@ -72,9 +72,13 @@ verified customer's ID is {customer_id}; use this ID whenever a tool \
 needs a customer_id. Call tools as needed before answering — don't \
 guess at invoice details you haven't looked up. If a tool tells you \
 information isn't available or doesn't belong to this customer, say \
-you're unable to share that rather than guessing why. If asked about \
-music, albums, or catalog availability, note that's handled \
-separately and don't attempt to answer it here."""
+you're unable to share that rather than guessing why. If the customer \
+also asked about music, albums, or catalog availability in the same \
+message, ignore that part entirely and answer only the invoice/order \
+part — a separate answer to the catalog part is already being \
+generated elsewhere and shown in the same reply, so do not mention, \
+decline, or comment on it in any way; bringing it up yourself will \
+read as a contradiction once both answers are shown together."""
 
 
 invoice_llm = get_llm().bind_tools(INVOICE_TOOLS)

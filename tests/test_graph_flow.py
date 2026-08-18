@@ -1,5 +1,6 @@
 import uuid
 
+from langchain_core.messages import AIMessage
 from langgraph.types import Command
 
 from customer_support.graph.build import compiled_graph, memory_store
@@ -365,3 +366,45 @@ class TestIdentityCaptureInCatalogOnlyConversation:
 
         # Fetched in the very same turn the identity was established.
         assert result["preferences_context"] == "Music Preferences: pop"
+
+
+class TestInvoiceAgentDoesNotCommentOnCatalogScope:
+    def test_invoice_answer_has_no_contradictory_catalog_disclaimer(self):
+        # Regression test: invoice_agent used to proactively decline
+        # the catalog part of a mixed question ("I can't help with
+        # albums..."), which read as a flat contradiction once joined
+        # with catalog_agent's own, correct answer to that exact
+        # question in the same reply.
+        config = {"configurable": {"thread_id": f"test-no-contradiction-{uuid.uuid4()}"}}
+
+        compiled_graph.invoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "do you have Michael Jackson albums and let me know "
+                            "the status of my last order"
+                        ),
+                    }
+                ],
+                "session_id": "test-no-contradiction",
+                "customer_id": None,
+                "customer_verified": False,
+                "intents": [],
+            },
+            config=config,
+        )
+        result = compiled_graph.invoke(
+            Command(resume={"customer_id": "43"}), config=config
+        )
+
+        answers = [
+            m.content for m in result["messages"] if isinstance(m, AIMessage) and m.content
+        ]
+        invoice_answer = answers[0].lower()
+
+        assert "unable" not in invoice_answer
+        assert "can't help" not in invoice_answer
+        assert "cannot help" not in invoice_answer
+        assert "handled separately" not in invoice_answer
