@@ -1,4 +1,51 @@
-from customer_support.ui.app import _parse_verification_reply
+from customer_support.ui.app import _parse_verification_reply, new_session, send_message
+
+
+def _drain(generator):
+    """Runs a send_message generator to completion, Gradio-style, and
+    returns its final yielded (history, msgbox, thread_id, status)."""
+
+    result = None
+    for result in generator:
+        pass
+    return result
+
+
+class TestSendMessageMixedIntent:
+    def test_mixed_intent_turn_surfaces_every_sub_agents_answer(self):
+        # Regression test: a mixed-intent turn ("Beatles albums" +
+        # "status of my last order") runs both invoice_agent and
+        # catalog_agent in sequence, each producing its own final
+        # AIMessage. send_message must surface both, not just the
+        # last one processed (catalog) while silently dropping the
+        # first (invoice).
+        thread_id, history, _ = new_session()
+
+        history, _, thread_id, status = _drain(
+            send_message(
+                "do you have any beatles albums? also what's the status of my last order?",
+                history,
+                thread_id,
+            )
+        )
+        assert "Waiting for your input" in status
+
+        history, _, thread_id, status = _drain(
+            send_message("my customer id is 43", history, thread_id)
+        )
+
+        assert status.startswith("✅")
+        final_answer = history[-1]["content"].lower()
+        # "beatles" is the direct subject of the catalog question, so
+        # catalog_agent's answer virtually always names it. "8.91" is
+        # the invoice total straight from tool data -- checked instead
+        # of a band name like "Led Zeppelin", which the model could
+        # occasionally paraphrase away ("the artist from that order")
+        # without changing the answer's correctness, causing a flaky
+        # false failure on a prose-wording detail this test doesn't
+        # actually care about.
+        assert "beatles" in final_answer  # catalog_agent's answer present
+        assert "8.91" in final_answer  # invoice_agent's answer present too
 
 
 class TestParseVerificationReply:

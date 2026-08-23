@@ -143,7 +143,7 @@ uv run pytest tests/ -v
 # or: pytest tests/ -v
 ```
 
-102 tests covering the database layer, catalog/invoice tools, JSON response
+128 tests covering the database layer, catalog/invoice tools, JSON response
 validity, and utility functions, plus:
 
 - `test_catalog_agent.py` / `test_invoice_agent.py` — the two agent
@@ -151,26 +151,97 @@ validity, and utility functions, plus:
   the tool-call loop, the no-results path, and (invoice only) cross-customer
   ownership rejection.
 - `test_graph_flow.py` — the full compiled graph end-to-end: a catalog-only
-  turn that never touches the identity gate, and invoice turns that
-  interrupt for verification and resume via `Command(resume=...)` across
-  all three identifiers (customer ID, email, phone) — including an
-  unknown email/phone correctly re-prompting instead of verifying.
-- `test_app.py` — `_parse_verification_reply`'s free-text parsing: email
-  and phone extraction take priority over a bare customer ID, and a
-  short digit run (a customer ID) is never mistaken for a phone number.
+  turn that never touches the identity gate, invoice turns that interrupt
+  for verification and resume via `Command(resume=...)` across all three
+  identifiers, and the identity-capture/preference-persistence scenarios
+  described below.
+- `test_app.py` — `_parse_verification_reply`'s free-text parsing, and
+  `send_message` surfacing every sub-agent's answer in a mixed-intent turn.
+- `test_router.py` — intent classification with recent conversation
+  context, including the off-topic-mid-conversation regression check.
+- `test_database.py::TestConcurrentQueries` — parallel tool calls against
+  the shared SQLite connection.
+- `test_evaluation.py` — the groundedness judge (see "Evaluation" below)
+  actually discriminates: flags an unstated inference and a
+  decline-then-answer contradiction, passes honest/consistent answers,
+  and never mistakes purchase history for a stated preference. Also
+  covers `guarded_response()` — the live guardrail actually replaces a
+  bad answer with the safe fallback, and leaves a good one untouched.
+
+## Evaluation
+
+`src/customer_support/evaluation/` is a small LLM-as-judge (`groundedness.py`)
+measuring response *quality* — groundedness (no claim asserted as fact
+unless it's backed by a tool result, a `System:` fact the agent was
+actually given, or something the customer explicitly said — purchase
+history/browsing activity is explicitly NOT a "preference" to the judge,
+by design) and self-consistency (no declining to help with something, then
+helping with it anyway). Neither is something the pytest suite checks; it
+verifies correctness (right structure, right tool called), not whether a
+response's claims are actually earned. The judge is used two ways:
+
+**Offline (a dataset run you trigger)**
+
+```bash
+uv run python -m customer_support.evaluation.run
+# or: python -m customer_support.evaluation.run
+```
+
+Requires `LANGCHAIN_API_KEY` (or `LANGSMITH_API_KEY`) in `.env` — the same
+key used for tracing (see "Observability" below). On first run this creates
+a `multi-agent-customer-support-groundedness` dataset in LangSmith and logs
+an Experiment against it, viewable under `Datasets & Testing` →
+that dataset → `Experiments`. Later runs reuse the existing dataset — edit
+`evaluation/dataset.py`'s `EXAMPLES` and delete the dataset in LangSmith to
+pick up changes.
+
+The dataset itself is built from two real bugs found during manual testing
+(see "Bugs found and fixed" below) run live against the actual graph, plus a
+clean control case and a hand-crafted bad response — the latter exists to
+prove the judge actually discriminates rather than rubber-stamping
+everything grounded.
+
+**Live (a runtime guardrail, on by default)**
+
+`catalog_agent_node` and `invoice_agent_node` (`agents/catalog_agent.py` /
+`agents/invoice_agent.py`) call `guarded_response()` on every final answer
+(not on intermediate tool-calling steps) *before* it's added to
+`state["messages"]` — so this is the offline judge's exact logic, running
+on real conversations, not just a dataset you run by hand. A response that
+fails is replaced with a safe fallback ("let me double check that...")
+rather than shown to the user, and the failure (with the judge's reasoning)
+is logged as a warning either way. It fails open: if the judge call itself
+errors, the original response is allowed through rather than blocking every
+answer because the safety check broke.
+
+The tradeoff is one extra LLM call, added latency, and added cost on every
+real final answer — worth it here given how much of "Bugs found and fixed"
+below is exactly this category of failure, but a real knob to be aware of
+if response latency or per-turn cost becomes a concern; there's no on/off
+flag today, since the whole point of a guardrail is that it isn't optional.
+
+## Observability
+
+LangSmith tracing activates automatically once `LANGCHAIN_TRACING_V2=true`,
+`LANGCHAIN_API_KEY`, and `LANGCHAIN_PROJECT` are set in `.env` — no code
+changes needed, since `langchain-core`/`langgraph` pick these up on their
+own. Every node and LLM call in a graph run appears as its own span in
+LangSmith's `Details`/`Trace` view (the `Messages`/`Turns` tab shows a
+simplified chat-style rendering instead, which hides the underlying model
+calls).
 
 ## Sample usage
 
 ```
 You: do you have any Beatles albums? also what's the status of my last order?
-Bot: I couldn't find any albums by The Beatles in our catalog. As for the
-     status of your last order, that's handled separately -- I can't
-     provide that here. Please verify your identity first: can you share
-     your customer ID, the email, or the phone number on your account?
+Bot: Please verify your identity first: can you share your customer ID,
+     the email, or the phone number on your account?
 
 You: my number is +33-03-80-73-66-99
 Bot: Your last order, placed on June 6, 2025, included tracks by Led
      Zeppelin, totaling $8.91.
+
+     I couldn't find any albums by The Beatles in our catalog.
 
 You: I love jazz, any recommendations?
 Bot: Here are some jazz tracks you might enjoy: ...
@@ -198,3 +269,70 @@ reappears once the same customer verifies again in a new session).
   Conversation" instead of replying) leaves that thread's paused
   checkpoint in memory indefinitely — harmless for a demo, but would need
   explicit cleanup/expiry in a long-running production deployment.
+
+## Bugs found and fixed during testing
+
+The automated test suite catches regressions in individual tools and
+nodes, but several real bugs only surfaced through actual multi-turn
+conversation testing — most involved cross-turn state or concurrency,
+which single-call unit tests don't exercise. Each has a regression test
+in `tests/` guarding against recurrence.
+
+- **Mixed-intent turns silently dropped one agent's answer.** A question
+  touching both catalog and invoice runs both subgraphs in sequence, each
+  producing its own final answer — but `send_message` (`ui/app.py`) only
+  ever showed `messages[-1]`, the last one processed (catalog), dropping
+  the first (invoice) without any error. Fixed by collecting every new
+  `AIMessage` produced during the turn, not just the last.
+- **Concurrent tool calls corrupted the database connection.**
+  LangGraph's `ToolNode` runs multiple tool calls from one message in
+  real parallel threads (e.g. checking two saved-preference genres at
+  once) — but the DB is a single shared SQLite `:memory:` connection
+  (`StaticPool`, required to keep the in-memory data alive at all across
+  threads), which isn't safe for simultaneous access. Two threads
+  querying at once corrupted each other's cursor state, raising
+  `IndexError`. Fixed with a `threading.Lock()` around every function
+  that touches the shared connection (`db/database.py`).
+- **Identity stated in the very first message was ignored.** "my
+  customer id is 43, where's my order?" always triggered a redundant
+  verification prompt, because `hitl_verify_node` interrupted
+  unconditionally without checking whether the triggering message
+  already contained an identifier. Fixed with a pre-check against the
+  triggering message before ever asking (`graph/build.py`).
+- **A bare preference reply was rejected as off-topic.** "I love jazz,"
+  replying to "what are you interested in?", was misclassified because
+  the router only ever saw the single latest message, with no way to
+  know it was answering a question. Fixed by including recent
+  conversation history in classification (`agents/router.py`) — the
+  system prompt is explicit that history is for interpreting the latest
+  message only, so an unrelated new message stays off-topic regardless
+  of what came before.
+- **Identity was never captured outside the invoice flow.** `customer_id`
+  was only ever set by `hitl_verify_node`, which only runs for unverified
+  invoice questions — so a catalog-only conversation had no way to ever
+  establish who the customer was, even if they volunteered their ID.
+  Stated preferences could never be saved, and previously-saved ones
+  could never be fetched, in a conversation that never asked an invoice
+  question. Fixed by moving opportunistic identity capture into
+  `load_memory_node` (`agents/memory.py`), which runs on every turn
+  regardless of intent — factored into a shared `identity.py` module to
+  avoid a circular import between `graph/build.py` and `agents/memory.py`.
+- **Catalog recommendations inferred an unstated "taste" from purchase
+  history.** Because `catalog_agent` receives the full shared
+  conversation, it could read an earlier invoice answer's purchase list
+  off the transcript and assert the customer's "diverse taste" as fact —
+  never something they actually said, and a different mechanism entirely
+  from the explicit-statement-only preference system. Fixed with an
+  explicit grounding rule in `CATALOG_SYSTEM_PROMPT`
+  (`agents/catalog_agent.py`) restricting personalization to
+  `preferences_context` only.
+- **A mixed-intent answer contradicted itself.** `invoice_agent`'s prompt
+  told it to proactively decline any catalog part of the question ("I
+  can't help with albums..."), which made sense when its answer was
+  shown alone — but once mixed-intent answers are joined into one reply
+  (see the first bug above), that disclaimer sat right next to
+  `catalog_agent`'s own correct answer to the exact question it just
+  said it couldn't help with. Fixed by telling `invoice_agent` to
+  silently ignore the catalog part rather than comment on it
+  (`agents/invoice_agent.py`), since a separate answer to it is always
+  generated anyway.

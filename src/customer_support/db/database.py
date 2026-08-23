@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import logging
+import threading
 import requests
 
 from sqlalchemy import create_engine, text
@@ -36,6 +37,16 @@ engine = create_engine(
     connect_args={"check_same_thread": False},
     future=True,
 )
+
+# StaticPool means every caller shares ONE underlying sqlite3 connection
+# (required to keep the in-memory data alive at all -- a second real
+# connection would see an empty database). check_same_thread=False only
+# lifts Python's same-thread guard; it doesn't make the connection safe
+# for two threads to call .execute() on at once. LangGraph's ToolNode
+# runs multiple tool calls in real parallel threads, and Gradio's queue
+# can serve multiple conversations concurrently too, so every function
+# below that touches `engine` must hold this lock for its query.
+_engine_lock = threading.Lock()
 
 _database_loaded = False
 
@@ -121,7 +132,7 @@ def execute_query(sql: str, params: dict | None = None) -> str:
 
     params = params or {}
 
-    with engine.connect() as conn:
+    with _engine_lock, engine.connect() as conn:
         result = conn.execute(text(sql), params)
         rows = [dict(row) for row in result.mappings().all()]
         logger.debug("Query returned %d row(s).", len(rows))
@@ -140,7 +151,7 @@ def find_customer_id_by_email(email: str) -> str | None:
         that email.
     """
 
-    with engine.connect() as conn:
+    with _engine_lock, engine.connect() as conn:
         row = conn.execute(
             text("SELECT CustomerId FROM Customer WHERE LOWER(Email) = LOWER(:email)"),
             {"email": email.strip()},
@@ -165,7 +176,7 @@ def find_customer_id_by_phone(phone: str) -> str | None:
     if not target:
         return None
 
-    with engine.connect() as conn:
+    with _engine_lock, engine.connect() as conn:
         rows = conn.execute(
             text("SELECT CustomerId, Phone FROM Customer WHERE Phone IS NOT NULL")
         ).mappings().all()
@@ -183,7 +194,7 @@ def find_customer_id_by_phone(phone: str) -> str | None:
 
 def verify_database() -> dict:
 
-    with engine.connect() as conn:
+    with _engine_lock, engine.connect() as conn:
         tables = conn.execute(text("""
             SELECT name
             FROM sqlite_master

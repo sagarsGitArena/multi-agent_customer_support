@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 
 import pytest
@@ -136,6 +137,55 @@ class TestFindCustomerIdByPhone:
     def test_empty_input_returns_none(self):
         assert find_customer_id_by_phone("") is None
         assert find_customer_id_by_phone(None) is None
+
+
+class TestConcurrentQueries:
+    """Regression test for a real crash: LangGraph's ToolNode runs
+    multiple tool calls from one AIMessage in real parallel threads
+    (e.g. checking two saved-preference genres at once), and the DB
+    is a single shared SQLite connection (StaticPool -- required to
+    keep the in-memory data alive at all) that isn't safe for two
+    threads to call .execute() on simultaneously. Without a lock
+    serializing access, concurrent queries corrupted each other's
+    cursor state and raised IndexError mid-read."""
+
+    def test_concurrent_queries_return_correct_uncorrupted_results(self):
+        def run():
+            result = execute_query(
+                "SELECT TrackId, Name FROM Track ORDER BY TrackId LIMIT 50"
+            )
+            return json.loads(result)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(run) for _ in range(40)]
+            results = [f.result() for f in futures]
+
+        assert all(len(r) == 50 for r in results)
+        assert all(r == results[0] for r in results)
+
+    def test_concurrent_mixed_query_shapes_do_not_interfere(self):
+        # Mirrors the real trigger: different queries (not just
+        # identical ones) firing at the same time.
+        def run_tracks():
+            return json.loads(
+                execute_query("SELECT TrackId FROM Track ORDER BY TrackId LIMIT 20")
+            )
+
+        def run_email_lookup():
+            return find_customer_id_by_email("isabelle_mercier@apple.fr")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = (
+                [executor.submit(run_tracks) for _ in range(10)]
+                + [executor.submit(run_email_lookup) for _ in range(10)]
+            )
+            results = [f.result() for f in futures]
+
+        track_results = [r for r in results if isinstance(r, list)]
+        email_results = [r for r in results if not isinstance(r, list)]
+
+        assert all(len(r) == 20 for r in track_results)
+        assert all(r == "43" for r in email_results)
 
 
 class TestHelloworldPyTest:

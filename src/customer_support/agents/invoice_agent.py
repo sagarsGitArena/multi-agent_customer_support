@@ -31,11 +31,12 @@ import json
 import logging
 from typing import Literal, Optional
 from typing_extensions import Annotated, TypedDict
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 from customer_support.config import get_llm
+from customer_support.evaluation.groundedness import build_transcript, guarded_response
 from customer_support.graph.state import format_state
 from customer_support.tools.invoice_tools import (
     get_customer_invoices,
@@ -72,9 +73,13 @@ verified customer's ID is {customer_id}; use this ID whenever a tool \
 needs a customer_id. Call tools as needed before answering — don't \
 guess at invoice details you haven't looked up. If a tool tells you \
 information isn't available or doesn't belong to this customer, say \
-you're unable to share that rather than guessing why. If asked about \
-music, albums, or catalog availability, note that's handled \
-separately and don't attempt to answer it here."""
+you're unable to share that rather than guessing why. If the customer \
+also asked about music, albums, or catalog availability in the same \
+message, ignore that part entirely and answer only the invoice/order \
+part — a separate answer to the catalog part is already being \
+generated elsewhere and shown in the same reply, so do not mention, \
+decline, or comment on it in any way; bringing it up yourself will \
+read as a contradiction once both answers are shown together."""
 
 
 invoice_llm = get_llm().bind_tools(INVOICE_TOOLS)
@@ -102,6 +107,16 @@ def invoice_agent_node(state: InvoiceState) -> dict:
         len(tool_calls),
         [call.get("name") for call in tool_calls],
     )
+
+    if not tool_calls and response.content:
+        # Live guardrail: see catalog_agent_node's identical check for
+        # why this runs here rather than only in the offline eval.
+        context = "\n".join(
+            [f"System: {system_message['content']}", build_transcript(state["messages"])]
+        )
+        checked_content, _ = guarded_response(context, response.content)
+        if checked_content != response.content:
+            response = AIMessage(content=checked_content)
 
     return {"messages": [response]}
 

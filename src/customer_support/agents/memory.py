@@ -10,6 +10,15 @@ from the recent conversation via structured output, and merges them
 into the stored profile via set union -- existing preferences are never
 removed or overwritten.
 
+load_memory_node also opportunistically captures identity: it runs on
+EVERY turn, before intent dispatch, so it's the only place that can
+notice a volunteered customer ID/email/phone even when the message
+isn't itself an invoice request (hitl_verify_node, the other path that
+sets customer_id, only runs for unverified invoice intents). Without
+this, a catalog-only conversation could volunteer an ID all day and
+never actually get identified -- so a stated preference has nothing to
+attach to, and a previously-saved one has nothing to be fetched for.
+
 Both nodes use get_store() (langgraph.config) rather than a store
 parameter on the node signature -- the documented, idiomatic way to
 reach the store bound via graph.compile(store=...) from inside any
@@ -21,12 +30,13 @@ doesn't apply to plain StateGraph nodes like these.)
 import logging
 from typing import Optional
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langgraph.config import get_store
 from pydantic import BaseModel, Field
 
 from customer_support.config import get_llm
-from customer_support.graph.state import GraphState, format_state
+from customer_support.graph.state import GraphState, format_state, recent_text_messages
+from customer_support.identity import extract_identity_from_message, resolve_customer_id
 
 logger = logging.getLogger(__name__)
 
@@ -110,16 +120,48 @@ def _merge_preferences(existing: list[str], new: list[str]) -> list[str]:
 
 def load_memory_node(state: GraphState) -> dict:
     """Reads the verified customer's saved preferences from the store
-    and formats them for injection into the music agent's prompt. If
-    the customer isn't verified yet this turn, there's nothing to look
-    up -- return None rather than crash on a missing customer_id."""
+    and formats them for injection into the music agent's prompt.
+
+    Before giving up for lack of a customer_id, opportunistically
+    checks whether the customer just volunteered one (or an email/
+    phone) in this turn's message -- this runs regardless of intent,
+    so it's what lets identity get established in a catalog-only
+    conversation that never reaches hitl_verify_node. Uses the same
+    resolution as hitl_verify_node (bare customer_id trusted as-is;
+    email/phone actually looked up), so this doesn't relax anything --
+    it just lets the same trust apply earlier, on any turn."""
 
     logger.info("load_memory_node: state=\n%s", format_state(state))
 
+    update: dict = {}
+
     customer_id = state.get("customer_id")
+    if not customer_id and not state.get("customer_verified"):
+        # NOT state["messages"][-1]: router_node runs before this node
+        # and, for a message it classifies as off-topic (exactly the
+        # case a bare "my customer id is 43" hits), it already appends
+        # its own rejection AIMessage -- so the true last message could
+        # already be that reply, not what the customer actually typed.
+        last_human_message = next(
+            (m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
+            None,
+        )
+        content = getattr(last_human_message, "content", "") or ""
+        identified = extract_identity_from_message(content)
+        if identified:
+            found_id = resolve_customer_id(identified)
+            if found_id:
+                logger.info(
+                    "load_memory_node: captured customer_id=%s from message", found_id
+                )
+                customer_id = found_id
+                update["customer_id"] = found_id
+                update["customer_verified"] = True
+
     if not customer_id:
         logger.info("load_memory_node: no verified customer_id yet, skipping")
-        return {"preferences_context": None}
+        update["preferences_context"] = None
+        return update
 
     store = get_store()
     item = store.get((MEMORY_NAMESPACE, customer_id), MEMORY_KEY)
@@ -131,35 +173,8 @@ def load_memory_node(state: GraphState) -> dict:
         customer_id,
         music_preferences,
     )
-    return {"preferences_context": formatted}
-
-
-def _recent_text_messages(messages: list, limit: int = HISTORY_WINDOW) -> list[dict]:
-    """Filters to Human/AI messages with non-empty content FIRST, then
-    takes the last `limit` -- not the other way around. Slicing the raw
-    message list first risks pushing the very human statement we care
-    about out of the window on tool-call-heavy turns (a multi-step
-    catalog/invoice loop can inject many ToolMessages between two real
-    conversational turns).
-
-    Reconstructs plain role/content dicts rather than reusing the
-    LangChain message objects: an AIMessage that still carries
-    tool_calls (even alongside real content) would make this an
-    invalid message sequence for the extraction call once its paired
-    ToolMessages have been filtered out of the window. Stripping to
-    content-only dicts sidesteps that entirely.
-    """
-
-    filtered = []
-    for m in messages:
-        content = getattr(m, "content", None)
-        if not content or not isinstance(content, str) or not content.strip():
-            continue
-        if isinstance(m, HumanMessage):
-            filtered.append({"role": "user", "content": content})
-        elif isinstance(m, AIMessage):
-            filtered.append({"role": "assistant", "content": content})
-    return filtered[-limit:]
+    update["preferences_context"] = formatted
+    return update
 
 
 def create_memory_node(state: GraphState) -> dict:
@@ -177,7 +192,7 @@ def create_memory_node(state: GraphState) -> dict:
         logger.info("create_memory_node: no verified customer_id, skipping")
         return {}
 
-    recent = _recent_text_messages(state["messages"])
+    recent = recent_text_messages(state["messages"], limit=HISTORY_WINDOW)
     if not recent:
         logger.info("create_memory_node: no text messages in window, skipping")
         return {}
