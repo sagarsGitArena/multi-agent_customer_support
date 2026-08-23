@@ -19,11 +19,13 @@ catalog_agent <-> catalog_tools loop exists.
 import logging
 from typing import Literal, Optional
 from typing_extensions import Annotated, TypedDict
+from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from customer_support.config import get_llm
+from customer_support.evaluation.groundedness import build_transcript, guarded_response
 from customer_support.graph.state import format_state
 from customer_support.tools.music_catalog_tools import (
     search_albums_by_artist,
@@ -99,6 +101,19 @@ def catalog_agent_node(state: CatalogState) -> dict:
         len(tool_calls),
         [call.get("name") for call in tool_calls],
     )
+
+    if not tool_calls and response.content:
+        # Live guardrail: only meaningful on a final answer (no more
+        # tool calls pending) -- checks it against the same context
+        # this LLM call was actually given before it ever reaches a
+        # user, blocking it (with a safe fallback) rather than just
+        # measuring it after the fact.
+        context = "\n".join(
+            [f"System: {system_message['content']}", build_transcript(state["messages"])]
+        )
+        checked_content, _ = guarded_response(context, response.content)
+        if checked_content != response.content:
+            response = AIMessage(content=checked_content)
 
     return {"messages": [response]}
 

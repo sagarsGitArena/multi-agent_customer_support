@@ -1,4 +1,4 @@
-from customer_support.evaluation.groundedness import score_response
+from customer_support.evaluation.groundedness import FALLBACK_MESSAGE, guarded_response, score_response
 
 
 class TestScoreResponse:
@@ -85,3 +85,65 @@ class TestScoreResponse:
         verdict = score_response(context, response)
 
         assert verdict.grounded is True
+
+    def test_does_not_treat_purchase_history_as_a_stated_preference(self):
+        # Regression test: the judge briefly conflated "the customer has
+        # purchase history" with "the customer has a saved preference",
+        # which would have defeated the entire point of this guardrail
+        # (explicit statements only, never inferred from behavior).
+        context = (
+            "System: Known customer preferences: No saved preferences for "
+            "this customer yet.\n"
+            "HumanMessage: what did I purchase in my previous orders?\n"
+            'AIMessage: Here are your previous purchases: "Whole Lotta Love" '
+            "by Led Zeppelin.\n"
+            "HumanMessage: any suggestions for me?"
+        )
+        response = (
+            "There are no saved preferences for you yet, could you tell me "
+            "what you like?"
+        )
+
+        verdict = score_response(context, response)
+
+        assert verdict.grounded is True
+
+
+class TestGuardedResponse:
+    def test_blocks_and_replaces_an_ungrounded_response(self):
+        context = (
+            "HumanMessage: what did I purchase in my previous orders?\n"
+            'AIMessage: Here are your previous purchases: "Whole Lotta Love" '
+            "by Led Zeppelin.\n"
+            "HumanMessage: any suggestions for me?"
+        )
+        bad_response = (
+            "Since you have diverse taste in music, including rock, "
+            "classical, and world music, here are some recommendations..."
+        )
+
+        content, verdict = guarded_response(context, bad_response)
+
+        assert content == FALLBACK_MESSAGE
+        assert verdict is not None
+        assert verdict.grounded is False
+
+    def test_passes_a_grounded_response_through_unchanged(self):
+        context = (
+            "System: Known customer preferences: No saved preferences for "
+            "this customer yet.\n"
+            "HumanMessage: any suggestions for me?"
+        )
+        good_response = "There are no saved preferences for you yet, could you tell me what you like?"
+
+        content, verdict = guarded_response(context, good_response)
+
+        assert content == good_response
+        assert verdict is not None
+        assert verdict.grounded is True
+
+    def test_empty_response_passes_through_without_calling_the_judge(self):
+        content, verdict = guarded_response("some context", "")
+
+        assert content == ""
+        assert verdict is None

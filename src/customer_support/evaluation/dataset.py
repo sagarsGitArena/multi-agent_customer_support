@@ -25,19 +25,8 @@ import uuid
 from langchain_core.messages import AIMessage, HumanMessage
 
 from customer_support.agents.catalog_agent import catalog_subgraph
+from customer_support.evaluation.groundedness import build_transcript
 from customer_support.graph.build import compiled_graph
-
-
-def _transcript(messages) -> str:
-    lines = []
-    for m in messages:
-        role = type(m).__name__
-        content = getattr(m, "content", "") or ""
-        if content:
-            lines.append(f"{role}: {content}")
-        for call in getattr(m, "tool_calls", None) or []:
-            lines.append(f"{role} tool_call: {call.get('name')}({call.get('args')})")
-    return "\n".join(lines)
 
 
 def _run_catalog_subgraph(state: dict) -> dict:
@@ -55,7 +44,7 @@ def _run_catalog_subgraph(state: dict) -> dict:
         f"{preferences_context or 'No saved preferences for this customer yet.'}"
     )
 
-    context = "\n".join([system_fact, _transcript(messages[:-1])])
+    context = "\n".join([system_fact, build_transcript(messages[:-1])])
     return {"answer": messages[-1].content, "context": context}
 
 
@@ -66,7 +55,7 @@ def _run_compiled_graph(state: dict) -> dict:
     answers = [m for m in messages if isinstance(m, AIMessage) and m.content]
     answer = "\n\n".join(m.content for m in answers)
     prior = messages[: messages.index(answers[-1])] if answers else messages
-    return {"answer": answer, "context": _transcript(prior)}
+    return {"answer": answer, "context": build_transcript(prior)}
 
 
 def _return_fixed_output(state: dict) -> dict:

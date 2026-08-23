@@ -20,7 +20,12 @@ during manual testing (see README "Bugs found and fixed"):
 `score_response` is the low-level scorer (context + response strings
 in, a verdict out) -- usable standalone, e.g. in tests. `evaluate_groundedness`
 wraps it in the shape LangSmith's `evaluate()` expects (a `run`/`example`
-pair in, a scored dict out).
+pair in, a scored dict out), for offline runs against a dataset
+(evaluation/run.py). `guarded_response` is the live version: called
+from catalog_agent_node/invoice_agent_node on every real final answer,
+before it ever reaches a user -- see the module docstrings there for
+why this makes the offline eval a measurement tool but this one an
+actual guardrail.
 """
 
 import logging
@@ -58,6 +63,16 @@ database lookup, or a fact the customer stated themselves), or
    A claim the response asserts as settled fact, but that was never \
 actually stated by the customer or returned by a tool in the CONTEXT, \
 is NOT grounded -- even if it happens to be a defensible guess.
+
+   "Customer preferences" specifically means an explicit taste \
+statement the customer made themselves (e.g. "I love jazz"), or what a \
+"System: Known customer preferences" line in the CONTEXT says, if \
+present -- treat that line as the definitive, authoritative answer to \
+"what preferences are known." Purchase history, browsing activity, or \
+any other behavior in the CONTEXT is NOT itself a "preference" and \
+must not be treated as one -- a response correctly saying "no saved \
+preferences" is grounded even if the CONTEXT shows past purchases, \
+because purchases are not preference statements.
 
 2. Self-consistency: the response must not contradict itself -- e.g. \
 declining to help with something ("I can't provide information about \
@@ -101,3 +116,59 @@ def evaluate_groundedness(run, example) -> dict:
         "score": 1 if verdict.grounded else 0,
         "comment": verdict.reasoning,
     }
+
+
+def build_transcript(messages) -> str:
+    """Renders a list of LangChain messages (Human/AI/Tool) as plain
+    text for the judge to check a response against. Shared by the live
+    guardrail below and the offline eval dataset (evaluation/dataset.py)
+    so both use the exact same notion of "context"."""
+
+    lines = []
+    for m in messages:
+        role = type(m).__name__
+        content = getattr(m, "content", "") or ""
+        if content:
+            lines.append(f"{role}: {content}")
+        for call in getattr(m, "tool_calls", None) or []:
+            lines.append(f"{role} tool_call: {call.get('name')}({call.get('args')})")
+    return "\n".join(lines)
+
+
+FALLBACK_MESSAGE = (
+    "Let me double check that before answering — could you ask again in a moment?"
+)
+
+
+def guarded_response(context: str, response_content: str) -> tuple[str, GroundednessVerdict | None]:
+    """The live guardrail: call this on a real final answer before it
+    reaches the user. Returns (content_to_actually_show, verdict).
+
+    On a failing verdict, the SECOND element of the tuple is non-None
+    and the FIRST is FALLBACK_MESSAGE, not the original text -- callers
+    should replace the response with the returned content rather than
+    just logging the verdict, or this is a measurement, not a guardrail.
+
+    Fails open: if the judge call itself errors (e.g. a transient API
+    issue), the original response is allowed through rather than
+    blocking every answer because the safety check broke -- logged
+    either way so a failure is visible."""
+
+    if not response_content:
+        return response_content, None
+
+    try:
+        verdict = score_response(context, response_content)
+    except Exception:
+        logger.exception("guarded_response: judge call failed, allowing response through")
+        return response_content, None
+
+    if verdict.grounded:
+        return response_content, verdict
+
+    logger.warning(
+        "guarded_response: BLOCKED ungrounded/inconsistent response (reasoning=%r): %r",
+        verdict.reasoning,
+        response_content,
+    )
+    return FALLBACK_MESSAGE, verdict

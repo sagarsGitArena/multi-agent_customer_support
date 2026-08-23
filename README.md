@@ -143,7 +143,7 @@ uv run pytest tests/ -v
 # or: pytest tests/ -v
 ```
 
-124 tests covering the database layer, catalog/invoice tools, JSON response
+128 tests covering the database layer, catalog/invoice tools, JSON response
 validity, and utility functions, plus:
 
 - `test_catalog_agent.py` / `test_invoice_agent.py` — the two agent
@@ -163,17 +163,24 @@ validity, and utility functions, plus:
   the shared SQLite connection.
 - `test_evaluation.py` — the groundedness judge (see "Evaluation" below)
   actually discriminates: flags an unstated inference and a
-  decline-then-answer contradiction, passes honest/consistent answers.
+  decline-then-answer contradiction, passes honest/consistent answers,
+  and never mistakes purchase history for a stated preference. Also
+  covers `guarded_response()` — the live guardrail actually replaces a
+  bad answer with the safe fallback, and leaves a good one untouched.
 
 ## Evaluation
 
-`src/customer_support/evaluation/` is a small LLM-as-judge harness measuring
-response *quality* — groundedness (no claim asserted as fact unless it's
-backed by a tool result or something the customer actually said) and
-self-consistency (no declining to help with something, then helping with
-it anyway) — neither of which the pytest suite above checks; it verifies
-correctness (right structure, right tool called), not whether a response's
-claims are actually earned.
+`src/customer_support/evaluation/` is a small LLM-as-judge (`groundedness.py`)
+measuring response *quality* — groundedness (no claim asserted as fact
+unless it's backed by a tool result, a `System:` fact the agent was
+actually given, or something the customer explicitly said — purchase
+history/browsing activity is explicitly NOT a "preference" to the judge,
+by design) and self-consistency (no declining to help with something, then
+helping with it anyway). Neither is something the pytest suite checks; it
+verifies correctness (right structure, right tool called), not whether a
+response's claims are actually earned. The judge is used two ways:
+
+**Offline (a dataset run you trigger)**
 
 ```bash
 uv run python -m customer_support.evaluation.run
@@ -183,8 +190,8 @@ uv run python -m customer_support.evaluation.run
 Requires `LANGCHAIN_API_KEY` (or `LANGSMITH_API_KEY`) in `.env` — the same
 key used for tracing (see "Observability" below). On first run this creates
 a `multi-agent-customer-support-groundedness` dataset in LangSmith and logs
-an Experiment against it, viewable under that project's `Tracing` →
-`Evaluators` tab. Later runs reuse the existing dataset — edit
+an Experiment against it, viewable under `Datasets & Testing` →
+that dataset → `Experiments`. Later runs reuse the existing dataset — edit
 `evaluation/dataset.py`'s `EXAMPLES` and delete the dataset in LangSmith to
 pick up changes.
 
@@ -193,6 +200,25 @@ The dataset itself is built from two real bugs found during manual testing
 clean control case and a hand-crafted bad response — the latter exists to
 prove the judge actually discriminates rather than rubber-stamping
 everything grounded.
+
+**Live (a runtime guardrail, on by default)**
+
+`catalog_agent_node` and `invoice_agent_node` (`agents/catalog_agent.py` /
+`agents/invoice_agent.py`) call `guarded_response()` on every final answer
+(not on intermediate tool-calling steps) *before* it's added to
+`state["messages"]` — so this is the offline judge's exact logic, running
+on real conversations, not just a dataset you run by hand. A response that
+fails is replaced with a safe fallback ("let me double check that...")
+rather than shown to the user, and the failure (with the judge's reasoning)
+is logged as a warning either way. It fails open: if the judge call itself
+errors, the original response is allowed through rather than blocking every
+answer because the safety check broke.
+
+The tradeoff is one extra LLM call, added latency, and added cost on every
+real final answer — worth it here given how much of "Bugs found and fixed"
+below is exactly this category of failure, but a real knob to be aware of
+if response latency or per-turn cost becomes a concern; there's no on/off
+flag today, since the whole point of a guardrail is that it isn't optional.
 
 ## Observability
 
