@@ -143,7 +143,7 @@ uv run pytest tests/ -v
 # or: pytest tests/ -v
 ```
 
-119 tests covering the database layer, catalog/invoice tools, JSON response
+124 tests covering the database layer, catalog/invoice tools, JSON response
 validity, and utility functions, plus:
 
 - `test_catalog_agent.py` / `test_invoice_agent.py` — the two agent
@@ -161,19 +161,61 @@ validity, and utility functions, plus:
   context, including the off-topic-mid-conversation regression check.
 - `test_database.py::TestConcurrentQueries` — parallel tool calls against
   the shared SQLite connection.
+- `test_evaluation.py` — the groundedness judge (see "Evaluation" below)
+  actually discriminates: flags an unstated inference and a
+  decline-then-answer contradiction, passes honest/consistent answers.
+
+## Evaluation
+
+`src/customer_support/evaluation/` is a small LLM-as-judge harness measuring
+response *quality* — groundedness (no claim asserted as fact unless it's
+backed by a tool result or something the customer actually said) and
+self-consistency (no declining to help with something, then helping with
+it anyway) — neither of which the pytest suite above checks; it verifies
+correctness (right structure, right tool called), not whether a response's
+claims are actually earned.
+
+```bash
+uv run python -m customer_support.evaluation.run
+# or: python -m customer_support.evaluation.run
+```
+
+Requires `LANGCHAIN_API_KEY` (or `LANGSMITH_API_KEY`) in `.env` — the same
+key used for tracing (see "Observability" below). On first run this creates
+a `multi-agent-customer-support-groundedness` dataset in LangSmith and logs
+an Experiment against it, viewable under that project's `Tracing` →
+`Evaluators` tab. Later runs reuse the existing dataset — edit
+`evaluation/dataset.py`'s `EXAMPLES` and delete the dataset in LangSmith to
+pick up changes.
+
+The dataset itself is built from two real bugs found during manual testing
+(see "Bugs found and fixed" below) run live against the actual graph, plus a
+clean control case and a hand-crafted bad response — the latter exists to
+prove the judge actually discriminates rather than rubber-stamping
+everything grounded.
+
+## Observability
+
+LangSmith tracing activates automatically once `LANGCHAIN_TRACING_V2=true`,
+`LANGCHAIN_API_KEY`, and `LANGCHAIN_PROJECT` are set in `.env` — no code
+changes needed, since `langchain-core`/`langgraph` pick these up on their
+own. Every node and LLM call in a graph run appears as its own span in
+LangSmith's `Details`/`Trace` view (the `Messages`/`Turns` tab shows a
+simplified chat-style rendering instead, which hides the underlying model
+calls).
 
 ## Sample usage
 
 ```
 You: do you have any Beatles albums? also what's the status of my last order?
-Bot: I couldn't find any albums by The Beatles in our catalog. As for the
-     status of your last order, that's handled separately -- I can't
-     provide that here. Please verify your identity first: can you share
-     your customer ID, the email, or the phone number on your account?
+Bot: Please verify your identity first: can you share your customer ID,
+     the email, or the phone number on your account?
 
 You: my number is +33-03-80-73-66-99
 Bot: Your last order, placed on June 6, 2025, included tracks by Led
      Zeppelin, totaling $8.91.
+
+     I couldn't find any albums by The Beatles in our catalog.
 
 You: I love jazz, any recommendations?
 Bot: Here are some jazz tracks you might enjoy: ...
