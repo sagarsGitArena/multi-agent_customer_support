@@ -7,6 +7,12 @@ looks up a verified customer's own orders/invoices, remembers a customer's
 stated music preferences across conversations, and rejects off-topic
 requests.
 
+## Project files & demo recording
+
+The project folder (zip) and the demo recording are available on Google
+Drive:
+[Project zip + recording](https://drive.google.com/file/d/1iX75WkDWszXw1iLSsDbc3MdMzCJXZo-Q/view?usp=sharing)
+
 ## Overview
 
 A router classifies each incoming message into `catalog` and/or `invoice`
