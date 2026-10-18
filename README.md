@@ -39,14 +39,14 @@ START -> router -> load_memory
      |         |               |         |
      v         v               v         v
 catalog_agent  hitl_verify --> invoice_agent   create_memory
-[subgraph]     (interrupt,     [subgraph]           |
+[subgraph]     (interrupt,     [subgraph]            |
     |          waits for ID;        |                |
     |          loops on itself      |                |
     |          until verified)      |                |
     |               |               |                |
     +---> advance_intent <----------+                |
-          (pop queue, loop back                       |
-           to dispatch_next_intent)                    v
+          (pop queue, loop back                      |
+           to dispatch_next_intent)                  v
                                                        END
 ```
 
